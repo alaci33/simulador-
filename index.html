@@ -1816,7 +1816,9 @@
     try { const o = JSON.parse(localStorage.getItem('au_prefs') || '{}'); ['auto','wait','rate','voice','key','region','cvoice','ekey','evoice','emodel','onlyCache','comment'].forEach(k => { if (k in o) AU[k] = o[k]; }); } catch (e) {}
     AU.rate = [0.7,0.85,1,1.15,1.3].reduce((a, b) => Math.abs(b - AU.rate) < Math.abs(a - AU.rate) ? b : a);
     try { AU.spent = parseFloat(localStorage.getItem('au_spent')) || 0; } catch (e) {}
-    const auOnline = () => !AU.cloudOff && ((AU.ekey && AU.evoice && (!AU.voice || AU.voice === '__el')) || (!AU.ekey && AU.key));
+    const auOnline = () => (AU.evoice && (!AU.voice || AU.voice === '__el')) || (!AU.evoice && !AU.ekey && AU.key && !AU.cloudOff);
+    const auCacheOnly = () => AU.evoice && auOnline() && (AU.onlyCache || !AU.ekey || AU.cloudOff);
+    const auErr = m => m === 'Failed to fetch' ? 'sem conexão ou bloqueio' : m === '401' ? '401: chave recusada ou créditos/limite da chave esgotados' : m;
     function auSpentUI() { const e = document.getElementById('au-spent'); if (e) e.textContent = 'Gasto estimado neste aparelho: ' + AU.spent + ' caracteres ≈ US$ ' + (AU.spent / 1000 * (AU.emodel.includes('flash') ? 0.04 : 0.08)).toFixed(2); }
     const auCur = () => state.filteredList[state.filteredIndex];
     const auSave = () => { try { localStorage.setItem('au_prefs', JSON.stringify({ auto:AU.auto, wait:AU.wait, rate:AU.rate, voice:AU.voice, key:AU.key, region:AU.region, cvoice:AU.cvoice, ekey:AU.ekey, evoice:AU.evoice, emodel:AU.emodel, onlyCache:AU.onlyCache, comment:AU.comment })); } catch (e) {} };
@@ -1837,7 +1839,7 @@
     function auInitUI() {
       const sel = document.getElementById('au-voice'); if (!sel) return;
       const all = auAll(), l = all.slice().sort((a, b) => (auIsPt(b) - auIsPt(a)) || (auScore(b) - auScore(a))), cur = auPick();
-      const elOn = AU.ekey && AU.evoice, mode = elOn && (!AU.voice || AU.voice === '__el') ? 'el' : (cur ? 'dev' : 'sys');
+      const elOn = !!AU.evoice, mode = elOn && (!AU.voice || AU.voice === '__el') ? 'el' : (cur ? 'dev' : 'sys');
       sel.innerHTML = (elOn ? '<option value="__el"' + (mode === 'el' ? ' selected' : '') + '>✨ ElevenLabs (voz profissional)</option>' : '') + '<option value="__sys"' + (mode === 'sys' ? ' selected' : '') + '>⚙ Voz do aparelho (padrão do sistema)</option>' + (l.length ? '<option disabled>' + all.length + ' vozes no aparelho (' + all.filter(auIsPt).length + ' em português)</option>' + l.map(v => `<option value="${v.voiceURI}"${cur && cur.voiceURI === v.voiceURI ? ' selected' : ''}>🎙 ${v.name} [${v.lang}${v.localService ? '' : ', online'}]</option>`).join('') : '<option>Nenhuma voz encontrada pelo navegador</option>');
       document.getElementById('au-wait').value = String(AU.wait);
       document.getElementById('au-ekey').value = AU.ekey; document.getElementById('au-evoice').value = AU.evoice; document.getElementById('au-emodel').value = AU.emodel; document.getElementById('au-only').checked = AU.onlyCache; document.getElementById('au-cmt').checked = AU.comment; auSpentUI();
@@ -1893,9 +1895,11 @@
     }
     function auClean(t) { return auPron(String(t).replace(/<[^>]+>/g, ' ')).replace(/\s*\n+\s*/g, '. ').replace(/\(\s*\)/g, ' lacuna ').replace(/\s+/g, ' ').replace(/\s+([,.;:])/g, '$1').replace(/([:;,])\./g, '$1').replace(/\.{2,}/g, '.').trim(); }
     AU.mem = new Map();
-    const auDB = () => AU._db || (AU._db = new Promise((res, rej) => { try { const o = indexedDB.open('au_cache', 1); o.onupgradeneeded = () => o.result.createObjectStore('a'); o.onsuccess = () => res(o.result); o.onerror = () => rej(o.error || new Error('IndexedDB bloqueado')); o.onblocked = () => rej(new Error('IndexedDB bloqueado')); } catch (e) { rej(e); } }));
-    const auIdbGet = async k => { const d = await auDB(); return await new Promise((res, rej) => { const q = d.transaction('a').objectStore('a').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); };
-    const auIdbPut = async (k, v) => { const d = await auDB(); await new Promise((res, rej) => { const t = d.transaction('a', 'readwrite'); t.objectStore('a').put(v, k); t.oncomplete = res; t.onerror = t.onabort = () => rej(t.error || new Error('falha ao gravar')); }); };
+    const auDB = () => AU._db || (AU._db = new Promise((res, rej) => { try { const o = indexedDB.open('au_cache', 1); o.onupgradeneeded = () => o.result.createObjectStore('a'); o.onsuccess = () => { const d = o.result; d.onclose = d.onversionchange = () => { AU._db = null; }; res(d); }; o.onerror = () => { AU._db = null; rej(o.error || new Error('IndexedDB bloqueado')); }; o.onblocked = () => { AU._db = null; rej(new Error('IndexedDB bloqueado')); }; } catch (e) { AU._db = null; rej(e); } }));
+    const auRetry = async fn => { try { return await fn(); } catch (e) { AU._db = null; return await fn(); } };
+    const auIdbGet = k => auRetry(async () => { const d = await auDB(); return await new Promise((res, rej) => { const q = d.transaction('a').objectStore('a').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); });
+    const auIdbPut = (k, v) => auRetry(async () => { const d = await auDB(); await new Promise((res, rej) => { const t = d.transaction('a', 'readwrite'); t.objectStore('a').put(v, k); t.oncomplete = res; t.onerror = t.onabort = () => rej(t.error || new Error('falha ao gravar')); }); });
+    async function auKeys() { try { return await auRetry(async () => { const d = await auDB(); return await new Promise((res, rej) => { const q = d.transaction('a').objectStore('a').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }); } catch (e) { return []; } }
     const auGet = async k => { if (AU.mem.has(k)) return AU.mem.get(k); try { const v = await auIdbGet(k); if (v) AU.mem.set(k, v); return v; } catch (e) {} };
     const auPut = async (k, v) => { AU.mem.set(k, v); try { await auIdbPut(k, v); return true; } catch (e) { AU.idbErr = String((e && e.message) || e); return false; } };
     async function auStorageTest() {
@@ -1908,17 +1912,17 @@
     async function audioStorageTest() { const r = await auStorageTest(); alert('Endereço: ' + r.proto + (r.seguro ? ' (seguro)' : ' (NÃO seguro)') + '\nIndexedDB (guarda os áudios): ' + (r.idb ? 'FUNCIONA' : 'NÃO FUNCIONA' + (r.idbErr ? ' – ' + r.idbErr : '')) + '\nlocalStorage (configurações): ' + (r.ls ? 'funciona' : 'não funciona') + '\nProteção contra limpeza: ' + r.persist + '\nÁudios no armazenamento: ' + (await auCount())); }
     AU.inf = new Map(); AU.busy = Promise.resolve();
     function auCloud(text, force, key) {
-      const canGen = !AU.ekey || force || AU._force || !AU.onlyCache;
+      const canGen = !AU.evoice ? true : !!(AU.ekey && !AU.cloudOff && (force || AU._force || !AU.onlyCache));
       if (!canGen) return auCloudRaw(text, force, key);
-      const id = (AU.ekey && key) ? key : (AU.ekey ? 'el|' + AU.evoice + '|' + AU.emodel : AU.cvoice) + '|' + auClean(text);
+      const id = (AU.evoice && key) ? key : (AU.evoice ? 'el|' + AU.evoice + '|' + AU.emodel : AU.cvoice) + '|' + auClean(text);
       if (AU.inf.has(id)) return AU.inf.get(id);
       const pr = auCloudRaw(text, force, key).finally(() => AU.inf.delete(id)); AU.inf.set(id, pr); return pr;
     }
     async function auCloudRaw(text, force, key) {
       await AU.busy;
-      const el = !!AU.ekey, t = auClean(text), id = (el && key) ? key : (el ? 'el|' + AU.evoice + '|' + AU.emodel : AU.cvoice) + '|' + t, hit = await auGet(id);
+      const el = !!AU.evoice, t = auClean(text), id = (el && key) ? key : (el ? 'el|' + AU.evoice + '|' + AU.emodel : AU.cvoice) + '|' + t, hit = await auGet(id);
       if (hit) return URL.createObjectURL(hit);
-      if (el && AU.onlyCache && !force && !AU._force) throw new Error('nocache');
+      if (el && (!AU.ekey || AU.cloudOff || (AU.onlyCache && !force && !AU._force))) throw new Error('nocache');
       if (el) {
         const r = await fetch('https://api.elevenlabs.io/v1/text-to-speech/' + AU.evoice + '?output_format=mp3_44100_64', { method:'POST', headers:{ 'xi-api-key':AU.ekey, 'Content-Type':'application/json', Accept:'audio/mpeg' }, body:JSON.stringify({ text:t, model_id:AU.emodel }) });
         if (!r.ok) throw new Error(String(r.status));
@@ -1951,15 +1955,23 @@
       }).catch(e => {
         if (my !== AU.run) return;
         AU._force = false;
-        if (/^(401|402|403|429)$/.test(e.message)) AU.cloudOff = true;
-        if (e.message !== 'nocache') { AU.warnAt = Date.now(); auStatus('⚠ Voz online falhou (' + (e.message === 'Failed to fetch' ? 'sem conexão ou bloqueio' : e.message) + '). Usando a voz do aparelho.'); }
+        if (/^(401|402|403)$/.test(e.message)) AU.cloudOff = true;
+        if (st && st.num) { done && done(); return; }
+        if (e.message !== 'nocache') { AU.warnAt = Date.now(); auStatus('⚠ Voz online falhou (' + auErr(e.message) + '). Usando a voz do aparelho.'); }
         auSpeak(text, done);
       });
     }
     async function auCoverage() { let n = 0; const miss = []; for (const [i, q] of state.filteredList.entries()) { if (await auCached(q)) n++; else miss.push(i); } return { n, miss }; }
-    async function auDel(k) { AU.mem.delete(k); try { const d = await auDB(); d.transaction('a', 'readwrite').objectStore('a').delete(k); } catch (e) {} }
-    async function auSyncN() { const n = await auCount(); try { localStorage.setItem('au_n', String(n)); } catch (e) {} const b = document.getElementById('au-banner'); if (b && n > 0) b.remove(); }
+    async function auDel(k) { AU.mem.delete(k); try { await auRetry(async () => { const d = await auDB(); d.transaction('a', 'readwrite').objectStore('a').delete(k); }); } catch (e) {} }
+    async function auAdoptNs() {
+      const ks = (await auKeys()).map(String).filter(k => k.startsWith('el2|') && !k.includes('|num|') && !k.endsWith('|fim')); if (!ks.length) return false;
+      const cnt = {}; for (const k of ks) { const q = k.split('|'); const ns = q[1] + '|' + q[2]; cnt[ns] = (cnt[ns] || 0) + 1; }
+      if (AU.evoice && cnt[AU.evoice + '|' + AU.emodel]) return false;
+      const b = Object.entries(cnt).sort((x, y) => y[1] - x[1])[0][0].split('|'); AU.evoice = b[0]; AU.emodel = b[1]; auSave(); auInitUI(); return true;
+    }
+    async function auSyncN() { await auAdoptNs(); const n = await auCount(); try { localStorage.setItem('au_n', String(n)); } catch (e) {} const b = document.getElementById('au-banner'); if (b && n > 0) b.remove(); }
     async function auGuard() {
+      await auAdoptNs();
       const n = await auCount(); let was = 0; try { was = +localStorage.getItem('au_n') || 0; } catch (e) {}
       if (n > was) { try { localStorage.setItem('au_n', String(n)); } catch (e) {} return; }
       if (was > 0 && n < was / 2 && !document.getElementById('au-banner')) {
@@ -1977,7 +1989,7 @@
         if (!AU.on || AU.run !== my0) { sel.value = cur; onTopicFilterChange(); return false; }
         sel.value = opts[k]; onTopicFilterChange();
         if (!state.filteredList.length) continue;
-        if (AU.ekey && auOnline() && AU.onlyCache && !(await auCoverage()).n) continue;
+        if (auCacheOnly() && !(await auCoverage()).n) continue;
         if (!AU.on || AU.run !== my0) { sel.value = cur; onTopicFilterChange(); return false; }
         auStatus('📚 Próximo assunto: ' + opts[k]); return true;
       }
@@ -1985,7 +1997,7 @@
     }
     async function auCovUI() {
       const e = document.getElementById('au-cov'); if (!e) return;
-      if (!(AU.ekey && AU.evoice)) { e.textContent = ''; return; }
+      if (!AU.evoice) { e.textContent = ''; return; }
       e.textContent = 'ElevenLabs: calculando…'; const c = await auCoverage();
       let pr = ''; try { pr = (await navigator.storage.persisted()) ? ' · armazenamento protegido' : ' · armazenamento NÃO protegido: faça backup'; } catch (x) {}
       e.textContent = 'ElevenLabs: ' + c.n + ' de ' + state.filteredList.length + ' questões deste filtro já têm áudio guardado' + (c.miss.length ? ' (a primeira sem áudio é a ' + (c.miss[0] + 1) + ')' : ' ✅') + pr + (c.n === 0 && AU.spent > 0 && (await auCount()) === 0 ? ' · armazenamento vazio: use 📥 Importar para restaurar o backup' : '');
@@ -1994,7 +2006,7 @@
     function audioTestCloud() { auUnlock(); if (!(AU.ekey && AU.evoice) && !AU.key) { alert('Cole a chave e o ID da voz da ElevenLabs.'); return; } auHalt(); AU.cloudOff = false; AU._force = true; auStatus(''); document.getElementById('au-bar').classList.add('show'); auSay('Olá! Esta é a voz neural online. Estou pronta para ler as suas questões.', () => { AU._force = false; document.getElementById('au-bar').classList.remove('show'); }); }
     async function audioExport() {
       const keys = new Set(AU.mem.keys());
-      try { const d = await auDB(); (await new Promise((r, j) => { const q = d.transaction('a').objectStore('a').getAllKeys(); q.onsuccess = () => r(q.result); q.onerror = () => j(q.error); })).forEach(k => keys.add(k)); } catch (e) {}
+      (await auKeys()).forEach(k => keys.add(k));
       keys.delete('__teste');
       if (!keys.size) { alert('Não há nenhum áudio guardado, nem nesta sessão nem no armazenamento do navegador.'); return; }
       const enc = new TextEncoder(), parts = [enc.encode('AUDIOBK1')]; let n = 0, bytes = 0;
@@ -2022,14 +2034,15 @@
       inp.click();
     }
     async function audioPregen() {
-      if (!AU.ekey || !AU.evoice) { alert('Cole a chave e o ID da voz da ElevenLabs.'); return; }
+      if (!AU.ekey || !AU.evoice) { alert('Para GERAR novos áudios é preciso a chave e o ID da voz da ElevenLabs. Para ouvir os já guardados não precisa.'); return; }
+      AU.cloudOff = false;
       const st = await auStorageTest();
       if (!st.idb && !confirm('⚠ ATENÇÃO: neste endereço o navegador NÃO guarda os áudios no celular.\nSe você gerar agora, os créditos são gastos e os áudios ficam só nesta sessão. Um backup será baixado ao final.\n\nGerar mesmo assim?')) return;
       const c = await auCoverage(), total = state.filteredList.length;
       if (!c.miss.length) { alert('Todas as ' + total + ' questões deste filtro já têm áudio guardado. Nada a gerar.'); return; }
       const n = Math.min(800, c.miss.length, parseInt(prompt('Já geradas: ' + c.n + ' de ' + total + '. Gerar quantas das ' + c.miss.length + ' que faltam? (máx. 800)', String(Math.min(15, c.miss.length))), 10) || 0); if (!n) return;
       const jobs = [];
-      for (const i of c.miss.slice(0, n)) for (const b of auBuild(state.filteredList[i], i + 1)) if (b.t === 'say' && !b.num && !(await auGet(b.k))) jobs.push(b);
+      for (const i of c.miss.slice(0, n)) for (const b of auBuild(state.filteredList[i], i + 1)) if (b.t === 'say' && !(await auGet(b.k))) jobs.push(b);
       const chars = jobs.reduce((a, j) => a + auClean(j.x).length, 0);
       if (!confirm('Gerar ' + n + ' questões novas (' + jobs.length + ' áudios, ' + chars + ' caracteres ≈ US$ ' + (chars / 1000 * (AU.emodel.includes('flash') ? 0.04 : 0.08)).toFixed(2) + ', uns ' + Math.ceil(jobs.length * 5 / 60) + ' min)? As que já têm áudio não são cobradas de novo. Para interromper, toque em ⏹.')) return;
       const bar = document.getElementById('au-bar'); bar.classList.add('show'); AU.stopGen = false;
@@ -2046,7 +2059,7 @@
         }
         msg = AU.stopGen ? '⏹ Interrompido: ' + done + ' de ' + jobs.length + ' áudios gerados. O resto pode ser gerado depois, sem repetir.' : '✅ ' + n + ' questões geradas e guardadas. Gasto total: ' + AU.spent + ' caracteres.';
       }
-      catch (e) { msg = '⚠ Parou após ' + done + ' de ' + jobs.length + ' (' + (e.message === 'Failed to fetch' ? 'sem conexão ou bloqueio' : e.message) + '). O que foi gerado está guardado.'; }
+      catch (e) { msg = '⚠ Parou após ' + done + ' de ' + jobs.length + ' (' + auErr(e.message) + '). O que foi gerado está guardado.'; }
       try { if (AU.genLock) AU.genLock.release(); } catch (e) {} AU.genLock = null;
       if (!st.idb || done >= 20) await audioExport();
       bar.classList.add('show'); auStatus(msg); auCovUI(); auSyncN(); setTimeout(() => bar.classList.remove('show'), 8000);
@@ -2127,7 +2140,7 @@
         { t:'say', k:auKey(q, 'r'), x:'A resposta correta é a alternativa ' + g + '. ' + q.alternativas[g] + '.' + (AU.comment ? '\n' + q.comentario : '') },
         { t:'wait', ms:2000, quiet:true }];
     }
-    async function auCount() { try { const d = await auDB(); return await new Promise(r => { const q = d.transaction('a').objectStore('a').getAllKeys(); q.onsuccess = () => r(q.result.filter(k => String(k).startsWith('el2|')).length); q.onerror = () => r(0); }); } catch (e) { return 0; } }
+    async function auCount() { return (await auKeys()).filter(k => String(k).startsWith('el2|')).length; }
     async function auCached(q) {
       for (const b of auBuild(q, 0)) if (b.t === 'say' && !b.num) {
         if (await auGet(b.k)) continue;
@@ -2139,7 +2152,7 @@
     }
     async function auLoad() {
       const my0 = AU.run; let q = auCur();
-      if (q && AU.ekey && auOnline() && AU.onlyCache) {
+      if (q && auCacheOnly()) {
         const from = state.filteredIndex;
         while (q && !(await auCached(q, state.filteredIndex + 1))) {
           if (!AU.on || AU.run !== my0) return;
