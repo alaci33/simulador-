@@ -1961,7 +1961,8 @@
         auSpeak(text, done);
       });
     }
-    async function auCoverage() { let n = 0; const miss = []; for (const [i, q] of state.filteredList.entries()) { if (await auCached(q)) n++; else miss.push(i); } return { n, miss }; }
+    function auScope() { const t = (document.getElementById('topic-filter-select') || {}).value || 'ALL'; return STUDY_ORDER.filter(q => inScope(q) && (t === 'ALL' || q.tema === t)); }
+    async function auCoverage(list) { list = list || state.filteredList; let n = 0; const miss = []; for (const [i, q] of list.entries()) { if (await auCached(q)) n++; else miss.push(i); } return { n, miss }; }
     async function auDel(k) { AU.mem.delete(k); try { await auRetry(async () => { const d = await auDB(); d.transaction('a', 'readwrite').objectStore('a').delete(k); }); } catch (e) {} }
     async function auAdoptNs() {
       const ks = (await auKeys()).map(String).filter(k => k.startsWith('el2|') && !k.includes('|num|') && !k.endsWith('|fim')); if (!ks.length) return false;
@@ -1998,9 +1999,9 @@
     async function auCovUI() {
       const e = document.getElementById('au-cov'); if (!e) return;
       if (!AU.evoice) { e.textContent = ''; return; }
-      e.textContent = 'ElevenLabs: calculando…'; const c = await auCoverage();
+      e.textContent = 'ElevenLabs: calculando…'; const sc = auScope(), c = await auCoverage(sc);
       let pr = ''; try { pr = (await navigator.storage.persisted()) ? ' · armazenamento protegido' : ' · armazenamento NÃO protegido: faça backup'; } catch (x) {}
-      e.textContent = 'ElevenLabs: ' + c.n + ' de ' + state.filteredList.length + ' questões deste filtro já têm áudio guardado' + (c.miss.length ? ' (a primeira sem áudio é a ' + (c.miss[0] + 1) + ')' : ' ✅') + pr + (c.n === 0 && AU.spent > 0 && (await auCount()) === 0 ? ' · armazenamento vazio: use 📥 Importar para restaurar o backup' : '');
+      e.textContent = 'ElevenLabs: ' + c.n + ' de ' + sc.length + ' questões deste assunto (respondidas ou não) já têm áudio guardado' + (c.miss.length ? ' (a primeira sem áudio é a ' + (c.miss[0] + 1) + ')' : ' ✅') + pr + (c.n === 0 && AU.spent > 0 && (await auCount()) === 0 ? ' · armazenamento vazio: use 📥 Importar para restaurar o backup' : '');
     }
     function audioCfg(k, v) { AU[k] = v; AU.cloudOff = false; auSave(); auInitUI(); auCovUI(); }
     function audioTestCloud() { auUnlock(); if (!(AU.ekey && AU.evoice) && !AU.key) { alert('Cole a chave e o ID da voz da ElevenLabs.'); return; } auHalt(); AU.cloudOff = false; AU._force = true; auStatus(''); document.getElementById('au-bar').classList.add('show'); auSay('Olá! Esta é a voz neural online. Estou pronta para ler as suas questões.', () => { AU._force = false; document.getElementById('au-bar').classList.remove('show'); }); }
@@ -2038,11 +2039,12 @@
       AU.cloudOff = false;
       const st = await auStorageTest();
       if (!st.idb && !confirm('⚠ ATENÇÃO: neste endereço o navegador NÃO guarda os áudios no celular.\nSe você gerar agora, os créditos são gastos e os áudios ficam só nesta sessão. Um backup será baixado ao final.\n\nGerar mesmo assim?')) return;
-      const c = await auCoverage(), total = state.filteredList.length;
-      if (!c.miss.length) { alert('Todas as ' + total + ' questões deste filtro já têm áudio guardado. Nada a gerar.'); return; }
+      const list = auScope(), c = await auCoverage(list), total = list.length;
+      if (!c.miss.length) { alert('Todas as ' + total + ' questões deste assunto já têm áudio guardado. Nada a gerar.'); return; }
       const n = Math.min(800, c.miss.length, parseInt(prompt('Já geradas: ' + c.n + ' de ' + total + '. Gerar quantas das ' + c.miss.length + ' que faltam? (máx. 800)', String(Math.min(15, c.miss.length))), 10) || 0); if (!n) return;
       const jobs = [];
-      for (const i of c.miss.slice(0, n)) for (const b of auBuild(state.filteredList[i], i + 1)) if (b.t === 'say' && !(await auGet(b.k))) jobs.push(b);
+      for (const i of c.miss.slice(0, n)) for (const b of auBuild(list[i], i + 1)) if (b.t === 'say' && !(await auGet(b.k))) jobs.push(b);
+      for (let m = 1; m <= total; m++) { const k = 'el2|' + AU.evoice + '|' + AU.emodel + '|num|' + m; if (!jobs.some(j => j.k === k) && !(await auGet(k))) jobs.push({ t:'say', x:'Questão ' + m + '.', num:true, k }); }
       const chars = jobs.reduce((a, j) => a + auClean(j.x).length, 0);
       if (!confirm('Gerar ' + n + ' questões novas (' + jobs.length + ' áudios, ' + chars + ' caracteres ≈ US$ ' + (chars / 1000 * (AU.emodel.includes('flash') ? 0.04 : 0.08)).toFixed(2) + ', uns ' + Math.ceil(jobs.length * 5 / 60) + ' min)? As que já têm áudio não são cobradas de novo. Para interromper, toque em ⏹.')) return;
       const bar = document.getElementById('au-bar'); bar.classList.add('show'); AU.stopGen = false;
@@ -2156,7 +2158,11 @@
         const from = state.filteredIndex;
         while (q && !(await auCached(q, state.filteredIndex + 1))) {
           if (!AU.on || AU.run !== my0) return;
-          if (state.filteredIndex >= state.filteredList.length - 1) { passiveStop(); alert('Não há áudio gerado daqui até o fim deste filtro. Use "Pré-gerar áudios do filtro atual" a partir da primeira questão.'); return; }
+          if (state.filteredIndex >= state.filteredList.length - 1) {
+            if (await auNextTheme(my0)) return auLoad();
+            if (!AU.on || AU.run !== my0) return;
+            passiveStop(); alert('Não há mais questões com áudio daqui em diante. Use "Pré-gerar áudios do filtro atual": ele gera só as que faltam, sem repetir as que já têm.'); return;
+          }
           nextQuestion(); q = auCur();
         }
       }
