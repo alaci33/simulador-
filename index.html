@@ -1962,7 +1962,7 @@
       });
     }
     function auScope() { const t = (document.getElementById('topic-filter-select') || {}).value || 'ALL'; return STUDY_ORDER.filter(q => inScope(q) && (t === 'ALL' || q.tema === t)); }
-    async function auCoverage(list) { list = list || state.filteredList; let n = 0; const miss = []; for (const [i, q] of list.entries()) { if (await auCached(q)) n++; else miss.push(i); } return { n, miss }; }
+    async function auCoverage(list) { list = list || state.filteredList; const ks = await auKeySet(); let n = 0; const miss = []; for (const [i, q] of list.entries()) { if (await auCached(q, ks)) n++; else miss.push(i); } return { n, miss }; }
     async function auDel(k) { AU.mem.delete(k); try { await auRetry(async () => { const d = await auDB(); d.transaction('a', 'readwrite').objectStore('a').delete(k); }); } catch (e) {} }
     async function auAdoptNs() {
       const ks = (await auKeys()).map(String).filter(k => k.startsWith('el2|') && !k.includes('|num|') && !k.endsWith('|fim')); if (!ks.length) return false;
@@ -1970,7 +1970,7 @@
       if (AU.evoice && cnt[AU.evoice + '|' + AU.emodel]) return false;
       const b = Object.entries(cnt).sort((x, y) => y[1] - x[1])[0][0].split('|'); AU.evoice = b[0]; AU.emodel = b[1]; auSave(); auInitUI(); return true;
     }
-    async function auSyncN() { await auAdoptNs(); const n = await auCount(); try { localStorage.setItem('au_n', String(n)); } catch (e) {} const b = document.getElementById('au-banner'); if (b && n > 0) b.remove(); }
+    async function auSyncN() { AU.hasLegacy = undefined; await auAdoptNs(); const n = await auCount(); try { localStorage.setItem('au_n', String(n)); } catch (e) {} const b = document.getElementById('au-banner'); if (b && n > 0) b.remove(); }
     async function auGuard() {
       await auAdoptNs();
       const n = await auCount(); let was = 0; try { was = +localStorage.getItem('au_n') || 0; } catch (e) {}
@@ -2010,30 +2010,57 @@
       (await auKeys()).forEach(k => keys.add(k));
       keys.delete('__teste');
       if (!keys.size) { alert('Não há nenhum áudio guardado, nem nesta sessão nem no armazenamento do navegador.'); return; }
-      const enc = new TextEncoder(), parts = [enc.encode('AUDIOBK1')]; let n = 0, bytes = 0;
-      for (const k of keys) { const b = await auGet(k); if (!b || !b.size) continue; const kb = enc.encode(k), h = new DataView(new ArrayBuffer(8)); h.setUint32(0, kb.length); h.setUint32(4, b.size); parts.push(h.buffer, kb, b); n++; bytes += b.size; }
-      const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(parts, { type:'application/octet-stream' })); a.download = 'audios-simulador-' + new Date().toISOString().slice(0, 10) + '.bak';
-      document.body.appendChild(a); a.click(); a.remove();
-      document.getElementById('au-bar').classList.add('show'); auStatus('💾 Backup com ' + n + ' áudios (' + (bytes / 1048576).toFixed(1) + ' MB) enviado para Downloads.');
+      const enc = new TextEncoder(), groups = []; let cur = [], sz = 0, n = 0, bytes = 0;
+      for (const k of keys) {
+        const b = await auGet(k); if (!b || !b.size) continue;
+        if (sz + b.size > (AU.chunkMB || 20) * 1048576 && cur.length) { groups.push(cur); cur = []; sz = 0; }
+        const kb = enc.encode(k), h = new DataView(new ArrayBuffer(8)); h.setUint32(0, kb.length); h.setUint32(4, b.size);
+        cur.push(h.buffer, kb, b); sz += b.size; n++; bytes += b.size;
+      }
+      if (cur.length) groups.push(cur);
+      const day = new Date().toISOString().slice(0, 10);
+      for (const [gi, g] of groups.entries()) {
+        const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([enc.encode('AUDIOBK1'), ...g], { type:'application/octet-stream' }));
+        a.download = 'audios-simulador-' + day + (groups.length > 1 ? '-parte' + (gi + 1) + 'de' + groups.length : '') + '.bak';
+        document.body.appendChild(a); a.click(); a.remove(); await new Promise(r => setTimeout(r, 400));
+      }
+      document.getElementById('au-bar').classList.add('show'); auStatus('💾 Backup com ' + n + ' áudios (' + (bytes / 1048576).toFixed(1) + ' MB) em ' + groups.length + ' arquivo(s) enviado(s) para Downloads.');
       setTimeout(() => document.getElementById('au-bar').classList.remove('show'), 6000);
+    }
+    async function auImportBuffer(buf) {
+      let n = 0; const dv = new DataView(buf), dec = new TextDecoder();
+      if (buf.byteLength < 8 || dec.decode(new Uint8Array(buf, 0, 8)) !== 'AUDIOBK1') return 0;
+      let o = 8;
+      while (o + 8 <= buf.byteLength) { const kl = dv.getUint32(o), bl = dv.getUint32(o + 4); o += 8; if (o + kl + bl > buf.byteLength) break; const k = dec.decode(new Uint8Array(buf, o, kl)); o += kl; await auPut(k, new Blob([buf.slice(o, o + bl)], { type:'audio/mpeg' })); o += bl; n++; }
+      return n;
     }
     function audioImport() {
       const inp = document.createElement('input'); inp.type = 'file'; inp.multiple = true;
       inp.onchange = () => { AU.busy = (async () => {
-        let n = 0;
-        for (const f of inp.files) {
-          try {
-            const buf = await f.arrayBuffer(), dv = new DataView(buf), dec = new TextDecoder();
-            if (buf.byteLength < 8 || dec.decode(new Uint8Array(buf, 0, 8)) !== 'AUDIOBK1') continue;
-            let o = 8;
-            while (o + 8 <= buf.byteLength) { const kl = dv.getUint32(o), bl = dv.getUint32(o + 4); o += 8; if (o + kl + bl > buf.byteLength) break; const k = dec.decode(new Uint8Array(buf, o, kl)); o += kl; await auPut(k, new Blob([buf.slice(o, o + bl)], { type:'audio/mpeg' })); o += bl; n++; }
-          } catch (x) {}
-        }
+        let n = 0; for (const f of inp.files) { try { n += await auImportBuffer(await f.arrayBuffer()); } catch (x) {} }
         try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (x) {}
         alert(n + ' áudios restaurados de ' + inp.files.length + ' arquivo(s).'); auCovUI(); auSyncN();
       })(); return AU.busy; };
       inp.click();
     }
+    async function auRestoreRun() {
+      const m = String(location.hostname).match(/^(.+)\.github\.io$/), repo = String(location.pathname).split('/').filter(Boolean)[0]; if (!m || !repo) return;
+      let list; try { const r = await fetch('https://api.github.com/repos/' + m[1] + '/' + repo + '/contents/audio'); if (!r.ok) return; list = (await r.json()).filter(f => /\.bak$/i.test(f.name)); } catch (e) { return; }
+      let rec = {}; try { rec = JSON.parse(localStorage.getItem('au_packs') || '{}'); } catch (e) {}
+      let was = 0; try { was = +localStorage.getItem('au_n') || 0; } catch (e) {}
+      const have = await auCount(); if (have === 0 || have < was / 2) rec = {};
+      const todo = list.filter(f => rec[f.name] !== f.sha); if (!todo.length) return;
+      const bar = document.getElementById('au-bar'); if (!AU.on) bar.classList.add('show');
+      let got = 0;
+      for (const [i, f] of todo.entries()) {
+        if (!AU.on) auStatus('📥 Restaurando áudios do servidor (' + (i + 1) + '/' + todo.length + ')…');
+        try { const r = await fetch('audio/' + encodeURIComponent(f.name)); if (!r.ok) continue; got += await auImportBuffer(await r.arrayBuffer()); rec[f.name] = f.sha; } catch (e) {}
+      }
+      try { localStorage.setItem('au_packs', JSON.stringify(rec)); } catch (e) {}
+      await auSyncN(); auCovUI();
+      if (!AU.on) { auStatus('📥 ' + got + ' áudios restaurados do servidor.'); setTimeout(() => bar.classList.remove('show'), 5000); }
+    }
+    function auAutoRestore() { AU.busy = auRestoreRun().catch(() => {}); return AU.busy; }
     async function audioPregen() {
       if (!AU.ekey || !AU.evoice) { alert('Para GERAR novos áudios é preciso a chave e o ID da voz da ElevenLabs. Para ouvir os já guardados não precisa.'); return; }
       AU.cloudOff = false;
@@ -2050,18 +2077,18 @@
       const bar = document.getElementById('au-bar'); bar.classList.add('show'); AU.stopGen = false;
       try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
       try { if (navigator.wakeLock) AU.genLock = await navigator.wakeLock.request('screen'); } catch (e) {}
-      const t0 = Date.now(); let done = 0, msg = '';
-      try {
-        for (let i = 0; i < jobs.length; i++) {
-          if (AU.stopGen) break;
-          const min = i ? Math.ceil((Date.now() - t0) / i * (jobs.length - i) / 60000) : Math.ceil(jobs.length * 5 / 60);
-          auStatus('⏳ Gerando ' + (i + 1) + '/' + jobs.length + ' · faltam ~' + min + ' min');
-          for (let t = 0; ; t++) { try { await auCloud(jobs[i].x, true, jobs[i].k); break; } catch (e) { if (e.message !== '429' || t >= 2) throw e; await new Promise(r => setTimeout(r, 4000)); } }
-          done++;
+      const t0 = Date.now(); let done = 0, msg = '', next = 0, failed = null;
+      const worker = async () => {
+        while (!AU.stopGen && !failed) {
+          const i = next++; if (i >= jobs.length) return;
+          try {
+            for (let t = 0; ; t++) { try { await auCloud(jobs[i].x, true, jobs[i].k); break; } catch (e) { if (e.message !== '429' || t >= 3) throw e; await new Promise(r => setTimeout(r, 3000 * (t + 1))); } }
+            done++; auStatus('⏳ Gerando ' + done + '/' + jobs.length + ' · faltam ~' + Math.ceil((Date.now() - t0) / done * (jobs.length - done) / 60000) + ' min');
+          } catch (e) { failed = e; }
         }
-        msg = AU.stopGen ? '⏹ Interrompido: ' + done + ' de ' + jobs.length + ' áudios gerados. O resto pode ser gerado depois, sem repetir.' : '✅ ' + n + ' questões geradas e guardadas. Gasto total: ' + AU.spent + ' caracteres.';
-      }
-      catch (e) { msg = '⚠ Parou após ' + done + ' de ' + jobs.length + ' (' + auErr(e.message) + '). O que foi gerado está guardado.'; }
+      };
+      await Promise.all([worker(), worker()]);
+      msg = failed ? '⚠ Parou após ' + done + ' de ' + jobs.length + ' (' + auErr(failed.message) + '). O que foi gerado está guardado.' : AU.stopGen ? '⏹ Interrompido: ' + done + ' de ' + jobs.length + ' áudios gerados. O resto pode ser gerado depois, sem repetir.' : '✅ ' + n + ' questões geradas e guardadas. Gasto total: ' + AU.spent + ' caracteres.';
       try { if (AU.genLock) AU.genLock.release(); } catch (e) {} AU.genLock = null;
       if (!st.idb || done >= 20) await audioExport();
       bar.classList.add('show'); auStatus(msg); auCovUI(); auSyncN(); setTimeout(() => bar.classList.remove('show'), 8000);
@@ -2143,10 +2170,12 @@
         { t:'wait', ms:2000, quiet:true }];
     }
     async function auCount() { return (await auKeys()).filter(k => String(k).startsWith('el2|')).length; }
-    async function auCached(q) {
+    async function auKeySet() { const st = new Set((await auKeys()).map(String)); AU.mem.forEach((v, k) => st.add(k)); return st; }
+    async function auCached(q, ks) {
       for (const b of auBuild(q, 0)) if (b.t === 'say' && !b.num) {
-        if (await auGet(b.k)) continue;
-        const old = await auGet('el|' + AU.evoice + '|' + AU.emodel + '|' + auClean(b.x));
+        if (ks ? ks.has(b.k) : await auGet(b.k)) continue;
+        if (AU.hasLegacy === undefined) AU.hasLegacy = (await auKeys()).some(k => /^el\|/.test(String(k)));
+        const old = AU.hasLegacy ? await auGet('el|' + AU.evoice + '|' + AU.emodel + '|' + auClean(b.x)) : null;
         if (old) { await auPut(b.k, old); continue; }
         return false;
       }
@@ -2156,7 +2185,8 @@
       const my0 = AU.run; let q = auCur();
       if (q && auCacheOnly()) {
         const from = state.filteredIndex;
-        while (q && !(await auCached(q, state.filteredIndex + 1))) {
+        const ks = await auKeySet();
+        while (q && !(await auCached(q, ks))) {
           if (!AU.on || AU.run !== my0) return;
           if (state.filteredIndex >= state.filteredList.length - 1) {
             if (await auNextTheme(my0)) return auLoad();
@@ -2224,6 +2254,7 @@
     if (window.speechSynthesis) speechSynthesis.onvoiceschanged = auInitUI;
     auInitUI();
     setTimeout(auGuard, 1500);
+    setTimeout(auAutoRestore, 3000);
     try { new MutationObserver(() => { if (document.getElementById('menu-panel').classList.contains('open')) auCovUI(); }).observe(document.getElementById('menu-panel'), { attributes:true, attributeFilter:['class'] }); } catch (e) {}
     window.onTopicFilterChange = onTopicFilterChange;
     window.pickSimChoice = pickSimChoice;
