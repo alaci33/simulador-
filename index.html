@@ -1897,13 +1897,13 @@
     }
     function auClean(t) { return auPron(String(t).replace(/<[^>]+>/g, ' ')).replace(/\s*\n+\s*/g, '. ').replace(/\(\s*\)/g, ' lacuna ').replace(/\s+/g, ' ').replace(/\s+([,.;:])/g, '$1').replace(/([:;,])\./g, '$1').replace(/\.{2,}/g, '.').trim(); }
     AU.mem = new Map();
-    const auDB = () => AU._db || (AU._db = new Promise((res, rej) => { try { const o = indexedDB.open('au_cache', 1); o.onupgradeneeded = () => o.result.createObjectStore('a'); o.onsuccess = () => { const d = o.result; d.onclose = d.onversionchange = () => { AU._db = null; }; res(d); }; o.onerror = () => { AU._db = null; rej(o.error || new Error('IndexedDB bloqueado')); }; o.onblocked = () => { AU._db = null; rej(new Error('IndexedDB bloqueado')); }; } catch (e) { AU._db = null; rej(e); } }));
+    const auDB = () => AU._db || (AU._db = new Promise((res, rej) => { try { const o = indexedDB.open('au_cache', 1); o.onupgradeneeded = () => o.result.createObjectStore('a'); o.onsuccess = () => { const d = o.result; d.onclose = () => { AU._db = null; }; d.onversionchange = () => { try { d.close(); } catch (e) {} AU._db = null; }; res(d); }; o.onerror = () => { AU._db = null; rej(o.error || new Error('IndexedDB bloqueado')); }; o.onblocked = () => { AU._db = null; rej(new Error('IndexedDB bloqueado')); }; } catch (e) { AU._db = null; rej(e); } }));
     const auRetry = async fn => { try { return await fn(); } catch (e) { AU._db = null; return await fn(); } };
     const auIdbGet = k => auRetry(async () => { const d = await auDB(); return await new Promise((res, rej) => { const q = d.transaction('a').objectStore('a').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); });
     const auIdbPut = (k, v) => auRetry(async () => { const d = await auDB(); await new Promise((res, rej) => { const t = d.transaction('a', 'readwrite'); t.objectStore('a').put(v, k); t.oncomplete = res; t.onerror = t.onabort = () => rej(t.error || new Error('falha ao gravar')); }); });
     async function auKeys() { try { return await auRetry(async () => { const d = await auDB(); return await new Promise((res, rej) => { const q = d.transaction('a').objectStore('a').getAllKeys(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }); } catch (e) { return []; } }
-    const auGet = async k => { if (AU.mem.has(k)) return AU.mem.get(k); try { const v = await auIdbGet(k); if (v) AU.mem.set(k, v); return v; } catch (e) {} };
-    const auPut = async (k, v) => { AU.mem.set(k, v); try { await auIdbPut(k, v); return true; } catch (e) { AU.idbErr = String((e && e.message) || e); return false; } };
+    const auGet = async k => { if (AU.mem.has(k)) return AU.mem.get(k); try { return await auIdbGet(k); } catch (e) {} };
+    const auPut = async (k, v) => { AU.mem.set(k, v); try { await auIdbPut(k, v); AU.mem.delete(k); return true; } catch (e) { AU.idbErr = String((e && e.message) || e); return false; } };
     async function auStorageTest() {
       const r = { proto:location.protocol, seguro:!!window.isSecureContext, idb:false, ls:false, persist:'n/d' };
       try { await auIdbPut('__teste', new Blob(['ok'])); const v = await auIdbGet('__teste'); r.idb = !!(v && v.size === 2); } catch (e) { r.idbErr = String((e && e.message) || e); }
@@ -1955,13 +1955,13 @@
       auCloud(text, !!(st && st.num), st && st.k).then(url => {
         if (my !== AU.run) return;
         auStatus('🔊 ElevenLabs');
-        auPlayUrl(url, AU.rate, () => { if (my === AU.run) done && done(); }, why => { if (my !== AU.run) return; if (st && st.k && why === 'erro de áudio') auDel(st.k); AU.warnAt = Date.now(); auStatus('⚠ Áudio ElevenLabs falhou (' + why + '). Usando a voz do aparelho.'); auSpeak(text, done); });
+        auPlayUrl(url, AU.rate, () => { try { URL.revokeObjectURL(url); } catch (e) {} if (my === AU.run) done && done(); }, why => { try { URL.revokeObjectURL(url); } catch (e) {} if (my !== AU.run) return; if (st && st.k && why === 'erro de áudio') auDel(st.k); AU.warnAt = Date.now(); auStatus('⚠ Áudio ElevenLabs falhou (' + why + '). Usando a voz do aparelho.'); auSpeak(text, done); });
       }).catch(e => {
         if (my !== AU.run) return;
         AU._force = false;
         if (/^(401|402|403)$/.test(e.message)) AU.cloudOff = true;
         if (st && st.num) { done && done(); return; }
-        if (e.message !== 'nocache') { AU.warnAt = Date.now(); auStatus('⚠ Voz online falhou (' + auErr(e.message) + '). Usando a voz do aparelho.'); }
+        if (e.message !== 'nocache') { AU.warnAt = Date.now(); auStatus('⚠ Voz online falhou (' + auErr(e.message) + '). Usando a voz do aparelho.'); } else { AU.warnAt = Date.now(); auStatus('ℹ Sem áudio guardado para esta questão — usando a voz do aparelho'); }
         auSpeak(text, done);
       });
     }
@@ -1969,7 +1969,7 @@
     async function auCoverage(list) { list = list || state.filteredList; const ks = await auKeySet(); let n = 0; const miss = []; for (const [i, q] of list.entries()) { if (await auCached(q, ks)) n++; else miss.push(i); } return { n, miss }; }
     async function auDel(k) { AU.mem.delete(k); try { await auRetry(async () => { const d = await auDB(); d.transaction('a', 'readwrite').objectStore('a').delete(k); }); } catch (e) {} }
     async function auAdoptNs() {
-      const ks = (await auKeys()).map(String).filter(k => k.startsWith('el2|') && !k.includes('|num|') && !k.endsWith('|fim')); if (!ks.length) return false;
+      const ks = [...(await auKeySet())].map(String).filter(k => k.startsWith('el2|') && !k.includes('|num|') && !k.endsWith('|fim')); if (!ks.length) return false;
       const cnt = {}; for (const k of ks) { const q = k.split('|'); const ns = q[1] + '|' + q[2]; cnt[ns] = (cnt[ns] || 0) + 1; }
       if (AU.evoice && cnt[AU.evoice + '|' + AU.emodel]) return false;
       const b = Object.entries(cnt).sort((x, y) => y[1] - x[1])[0][0].split('|'); AU.evoice = b[0]; AU.emodel = b[1]; auSave(); auInitUI(); return true;
@@ -2040,20 +2040,25 @@
       if (!confirm('Confirma que TODOS os áudios guardados agora já estão enviados ao GitHub?\nO app passará a exportar só o que for gerado daqui em diante.')) return;
       (await auKeySet()).forEach(k => AU.exp.add(k)); auSaveExp(); auCovUI();
     }
-    async function auImportBuffer(buf) {
+    async function auImportBuffer(buf, known) {
       let n = 0; const dv = new DataView(buf), dec = new TextDecoder();
       if (buf.byteLength < 8 || dec.decode(new Uint8Array(buf, 0, 8)) !== 'AUDIOBK1') return 0;
       let o = 8;
-      while (o + 8 <= buf.byteLength) { const kl = dv.getUint32(o), bl = dv.getUint32(o + 4); o += 8; if (o + kl + bl > buf.byteLength) break; const k = dec.decode(new Uint8Array(buf, o, kl)); o += kl; await auPut(k, new Blob([buf.slice(o, o + bl)], { type:'audio/mpeg' })); AU.exp.add(k); o += bl; n++; }
+      while (o + 8 <= buf.byteLength) {
+        const kl = dv.getUint32(o), bl = dv.getUint32(o + 4); o += 8; if (o + kl + bl > buf.byteLength) break;
+        const k = dec.decode(new Uint8Array(buf, o, kl)); o += kl;
+        if (known && known.has(k)) { AU.exp.add(k); o += bl; continue; }
+        await auPut(k, new Blob([buf.slice(o, o + bl)], { type:'audio/mpeg' })); AU.exp.add(k); if (known) known.add(k); o += bl; n++;
+      }
       if (n) auSaveExp();
       return n;
     }
     function audioImport() {
       const inp = document.createElement('input'); inp.type = 'file'; inp.multiple = true;
       inp.onchange = () => { AU.busy = (async () => {
-        let n = 0; for (const f of inp.files) { try { n += await auImportBuffer(await f.arrayBuffer()); } catch (x) {} }
+        let n = 0; const known = await auKeySet(); for (const f of inp.files) { try { n += await auImportBuffer(await f.arrayBuffer(), known); } catch (x) {} }
         try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (x) {}
-        alert(n + ' áudios restaurados de ' + inp.files.length + ' arquivo(s).'); auCovUI(); auSyncN();
+        alert(n + ' áudios novos restaurados de ' + inp.files.length + ' arquivo(s).'); auCovUI(); auSyncN();
       })(); return AU.busy; };
       inp.click();
     }
@@ -2067,15 +2072,15 @@
       const have = await auCount(); if (have === 0 || have < was / 2) rec = {};
       const todo = list.filter(f => rec[f.name] !== f.sha); if (!todo.length) return;
       const bar = document.getElementById('au-bar'); if (!AU.on) bar.classList.add('show');
-      let got = 0; const seen = new Set();
+      let got = 0; const seen = new Set(), known = await auKeySet();
       for (const [i, f] of todo.entries()) {
         if (seen.has(f.sha)) { rec[f.name] = f.sha; continue; } seen.add(f.sha);
         if (!AU.on) auStatus('📥 Restaurando áudios do servidor (' + (i + 1) + '/' + todo.length + ')…');
-        try { const r = await fetch(encodeURIComponent(dir) + '/' + encodeURIComponent(f.name)); if (!r.ok) continue; got += await auImportBuffer(await r.arrayBuffer()); rec[f.name] = f.sha; } catch (e) {}
+        try { const r = await fetch(encodeURIComponent(dir) + '/' + encodeURIComponent(f.name)); if (!r.ok) continue; got += await auImportBuffer(await r.arrayBuffer(), known); rec[f.name] = f.sha; } catch (e) {}
       }
       try { localStorage.setItem('au_packs', JSON.stringify(rec)); } catch (e) {}
       await auSyncN(); auCovUI();
-      if (!AU.on) { auStatus('📥 ' + got + ' áudios restaurados do servidor.'); setTimeout(() => bar.classList.remove('show'), 5000); }
+      if (!AU.on) { auStatus('📥 ' + got + ' áudios novos restaurados do servidor.'); setTimeout(() => bar.classList.remove('show'), 5000); }
     }
     function auAutoRestore() { AU.busy = auRestoreRun().catch(() => {}); return AU.busy; }
     async function audioPregen() {
@@ -2139,7 +2144,8 @@
         if (stale()) return; fin = true; clearTimeout(wd); speechSynthesis.cancel(); AU.cancelAt = Date.now();
         if (k === 0 && best && best !== v) return auSpeak(text, done, 1);
         if (document.hidden) { AU.tts = true; return; }
-        auStatus('⚠ A voz do aparelho falhou (' + why + '). Troque o mecanismo de voz do Android.');
+        const none = !(window.speechSynthesis && speechSynthesis.getVoices && speechSynthesis.getVoices().length);
+        auStatus(none ? '⚠ Este aparelho não tem voz própria e não achei áudios guardados para esta questão. Aguarde a restauração (📥) ou confira o armazenamento no menu.' : '⚠ A voz do aparelho falhou (' + why + '). Troque o mecanismo de voz do Android.');
         const bar = document.getElementById('au-bar'); if (bar) bar.classList.add('show');
         if (AU.on) { AU.paused = true; const b = document.getElementById('au-pp'); if (b) b.textContent = '▶'; }
       };
@@ -2199,7 +2205,10 @@
       return true;
     }
     async function auLoad() {
-      const my0 = AU.run; let q = auCur();
+      const my0 = AU.run;
+      if (AU.busy) { auStatus('⏳ Aguardando a restauração dos áudios…'); await AU.busy; if (!AU.on || AU.run !== my0) return; }
+      await auAdoptNs();
+      let q = auCur();
       if (q && auCacheOnly()) {
         const from = state.filteredIndex;
         const ks = await auKeySet();
@@ -2271,7 +2280,7 @@
     if (window.speechSynthesis) speechSynthesis.onvoiceschanged = auInitUI;
     auInitUI();
     setTimeout(auGuard, 1500);
-    setTimeout(auAutoRestore, 3000);
+    setTimeout(auAutoRestore, 800);
     try { new MutationObserver(() => { if (document.getElementById('menu-panel').classList.contains('open')) auCovUI(); }).observe(document.getElementById('menu-panel'), { attributes:true, attributeFilter:['class'] }); } catch (e) {}
     window.onTopicFilterChange = onTopicFilterChange;
     window.pickSimChoice = pickSimChoice;
