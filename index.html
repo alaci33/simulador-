@@ -543,7 +543,9 @@
         <div id="au-spent" style="font-size:0.8rem;color:#94a3b8"></div>
         <div id="au-cov" style="font-size:0.8rem;color:#94a3b8"></div>
         <button class="menu-btn" onclick="audioStorageTest()">🔧 Testar armazenamento</button>
-        <button class="menu-btn" onclick="audioExport()">💾 Exportar áudios (backup)</button>
+        <button class="menu-btn" onclick="audioExport()">💾 Exportar só os áudios novos</button>
+        <button class="menu-btn" onclick="audioExport(true)">💾 Exportar tudo (backup completo)</button>
+        <button class="menu-btn" onclick="audioMarkSent()">✅ Marcar tudo como já enviado ao GitHub</button>
         <button class="menu-btn" onclick="audioImport()">📥 Importar áudios (restaurar backup)</button>
       </div>
 
@@ -1911,6 +1913,8 @@
     }
     async function audioStorageTest() { const r = await auStorageTest(); alert('Endereço: ' + r.proto + (r.seguro ? ' (seguro)' : ' (NÃO seguro)') + '\nIndexedDB (guarda os áudios): ' + (r.idb ? 'FUNCIONA' : 'NÃO FUNCIONA' + (r.idbErr ? ' – ' + r.idbErr : '')) + '\nlocalStorage (configurações): ' + (r.ls ? 'funciona' : 'não funciona') + '\nProteção contra limpeza: ' + r.persist + '\nÁudios no armazenamento: ' + (await auCount())); }
     AU.inf = new Map(); AU.busy = Promise.resolve();
+    AU.exp = new Set(); try { JSON.parse(localStorage.getItem('au_exp') || '[]').forEach(k => AU.exp.add(k)); } catch (e) {}
+    const auSaveExp = () => { try { localStorage.setItem('au_exp', JSON.stringify([...AU.exp])); } catch (e) {} };
     function auCloud(text, force, key) {
       const canGen = !AU.evoice ? true : !!(AU.ekey && !AU.cloudOff && (force || AU._force || !AU.onlyCache));
       if (!canGen) return auCloudRaw(text, force, key);
@@ -2001,37 +2005,47 @@
       if (!AU.evoice) { e.textContent = ''; return; }
       e.textContent = 'ElevenLabs: calculando…'; const sc = auScope(), c = await auCoverage(sc);
       let pr = ''; try { pr = (await navigator.storage.persisted()) ? ' · armazenamento protegido' : ' · armazenamento NÃO protegido: faça backup'; } catch (x) {}
-      e.textContent = 'ElevenLabs: ' + c.n + ' de ' + sc.length + ' questões deste assunto (respondidas ou não) já têm áudio guardado' + (c.miss.length ? ' (a primeira sem áudio é a ' + (c.miss[0] + 1) + ')' : ' ✅') + pr + (c.n === 0 && AU.spent > 0 && (await auCount()) === 0 ? ' · armazenamento vazio: use 📥 Importar para restaurar o backup' : '');
+      let bk = ''; try { let pend = 0; (await auKeySet()).forEach(k => { if (String(k).startsWith('el2|') && !AU.exp.has(k)) pend++; }); bk = ' · 💾 ' + (pend ? pend + ' áudios sem backup' : 'tudo com backup'); } catch (x) {}
+      e.textContent = 'ElevenLabs: ' + c.n + ' de ' + sc.length + ' questões deste assunto (respondidas ou não) já têm áudio guardado' + (c.miss.length ? ' (a primeira sem áudio é a ' + (c.miss[0] + 1) + ')' : ' ✅') + pr + bk + (c.n === 0 && AU.spent > 0 && (await auCount()) === 0 ? ' · armazenamento vazio: use 📥 Importar para restaurar o backup' : '');
     }
     function audioCfg(k, v) { AU[k] = v; AU.cloudOff = false; auSave(); auInitUI(); auCovUI(); }
     function audioTestCloud() { auUnlock(); if (!(AU.ekey && AU.evoice) && !AU.key) { alert('Cole a chave e o ID da voz da ElevenLabs.'); return; } auHalt(); AU.cloudOff = false; AU._force = true; auStatus(''); document.getElementById('au-bar').classList.add('show'); auSay('Olá! Esta é a voz neural online. Estou pronta para ler as suas questões.', () => { AU._force = false; document.getElementById('au-bar').classList.remove('show'); }); }
-    async function audioExport() {
-      const keys = new Set(AU.mem.keys());
-      (await auKeys()).forEach(k => keys.add(k));
-      keys.delete('__teste');
-      if (!keys.size) { alert('Não há nenhum áudio guardado, nem nesta sessão nem no armazenamento do navegador.'); return; }
-      const enc = new TextEncoder(), groups = []; let cur = [], sz = 0, n = 0, bytes = 0;
-      for (const k of keys) {
-        const b = await auGet(k); if (!b || !b.size) continue;
-        if (sz + b.size > (AU.chunkMB || 20) * 1048576 && cur.length) { groups.push(cur); cur = []; sz = 0; }
-        const kb = enc.encode(k), h = new DataView(new ArrayBuffer(8)); h.setUint32(0, kb.length); h.setUint32(4, b.size);
-        cur.push(h.buffer, kb, b); sz += b.size; n++; bytes += b.size;
-      }
-      if (cur.length) groups.push(cur);
-      const day = new Date().toISOString().slice(0, 10);
-      for (const [gi, g] of groups.entries()) {
-        const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([enc.encode('AUDIOBK1'), ...g], { type:'application/octet-stream' }));
-        a.download = 'audios-simulador-' + day + (groups.length > 1 ? '-parte' + (gi + 1) + 'de' + groups.length : '') + '.bak';
-        document.body.appendChild(a); a.click(); a.remove(); await new Promise(r => setTimeout(r, 400));
-      }
-      document.getElementById('au-bar').classList.add('show'); auStatus('💾 Backup com ' + n + ' áudios (' + (bytes / 1048576).toFixed(1) + ' MB) em ' + groups.length + ' arquivo(s) enviado(s) para Downloads.');
-      setTimeout(() => document.getElementById('au-bar').classList.remove('show'), 6000);
+    async function audioExport(all) {
+      if (AU.exporting) return; AU.exporting = true;
+      try {
+        const keys = new Set(AU.mem.keys()); (await auKeys()).forEach(k => keys.add(k)); keys.delete('__teste');
+        const list = [...keys].filter(k => all === true || !AU.exp.has(k));
+        if (!list.length) { alert(all === true ? 'Não há nenhum áudio guardado.' : 'Nenhum áudio novo desde o último backup. Nada a exportar.'); return; }
+        const enc = new TextEncoder(), groups = [], used = []; let cur = [], sz = 0, bytes = 0;
+        for (const k of list) {
+          const b = await auGet(k); if (!b || !b.size) continue;
+          if (sz + b.size > (AU.chunkMB || 20) * 1048576 && cur.length) { groups.push(cur); cur = []; sz = 0; }
+          const kb = enc.encode(k), h = new DataView(new ArrayBuffer(8)); h.setUint32(0, kb.length); h.setUint32(4, b.size);
+          cur.push(h.buffer, kb, b); sz += b.size; bytes += b.size; used.push(k);
+        }
+        if (cur.length) groups.push(cur);
+        const d = new Date(), p2 = x => String(x).padStart(2, '0'), stamp = p2(d.getMonth() + 1) + p2(d.getDate()) + '-' + p2(d.getHours()) + p2(d.getMinutes()), names = [];
+        for (const [gi, g] of groups.entries()) {
+          const nm = 'bk-' + stamp + (groups.length > 1 ? '-' + (gi + 1) + 'de' + groups.length : '') + '.bak'; names.push(nm);
+          const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([enc.encode('AUDIOBK1'), ...g], { type:'application/octet-stream' })); a.download = nm;
+          document.body.appendChild(a); a.click(); a.remove(); await new Promise(r => setTimeout(r, 400));
+        }
+        used.forEach(k => AU.exp.add(k)); auSaveExp();
+        document.getElementById('au-bar').classList.add('show');
+        auStatus('💾 ' + used.length + ' áudios ' + (all === true ? '(completo)' : 'novos') + ' · ' + (bytes / 1048576).toFixed(1) + ' MB · ' + names.join(', ') + ' · envie à pasta audio do GitHub');
+        setTimeout(() => document.getElementById('au-bar').classList.remove('show'), 9000);
+      } finally { AU.exporting = false; }
+    }
+    async function audioMarkSent() {
+      if (!confirm('Confirma que TODOS os áudios guardados agora já estão enviados ao GitHub?\nO app passará a exportar só o que for gerado daqui em diante.')) return;
+      (await auKeySet()).forEach(k => AU.exp.add(k)); auSaveExp(); auCovUI();
     }
     async function auImportBuffer(buf) {
       let n = 0; const dv = new DataView(buf), dec = new TextDecoder();
       if (buf.byteLength < 8 || dec.decode(new Uint8Array(buf, 0, 8)) !== 'AUDIOBK1') return 0;
       let o = 8;
-      while (o + 8 <= buf.byteLength) { const kl = dv.getUint32(o), bl = dv.getUint32(o + 4); o += 8; if (o + kl + bl > buf.byteLength) break; const k = dec.decode(new Uint8Array(buf, o, kl)); o += kl; await auPut(k, new Blob([buf.slice(o, o + bl)], { type:'audio/mpeg' })); o += bl; n++; }
+      while (o + 8 <= buf.byteLength) { const kl = dv.getUint32(o), bl = dv.getUint32(o + 4); o += 8; if (o + kl + bl > buf.byteLength) break; const k = dec.decode(new Uint8Array(buf, o, kl)); o += kl; await auPut(k, new Blob([buf.slice(o, o + bl)], { type:'audio/mpeg' })); AU.exp.add(k); o += bl; n++; }
+      if (n) auSaveExp();
       return n;
     }
     function audioImport() {
@@ -2045,16 +2059,19 @@
     }
     async function auRestoreRun() {
       const m = String(location.hostname).match(/^(.+)\.github\.io$/), repo = String(location.pathname).split('/').filter(Boolean)[0]; if (!m || !repo) return;
-      let list; try { const r = await fetch('https://api.github.com/repos/' + m[1] + '/' + repo + '/contents/audio'); if (!r.ok) return; list = (await r.json()).filter(f => /\.bak$/i.test(f.name)); } catch (e) { return; }
+      let list = [], dir = 'audio';
+      for (const d of ['audio', 'áudio']) { try { const r = await fetch('https://api.github.com/repos/' + m[1] + '/' + repo + '/contents/' + encodeURIComponent(d)); if (!r.ok) continue; const j = await r.json(); if (Array.isArray(j)) { list = j.filter(f => f.type !== 'dir' && !/\.(html?|txt|md|json|png|jpe?g|gif|css|js)$/i.test(f.name)); dir = d; break; } } catch (e) {} }
+      if (!list.length) return;
       let rec = {}; try { rec = JSON.parse(localStorage.getItem('au_packs') || '{}'); } catch (e) {}
       let was = 0; try { was = +localStorage.getItem('au_n') || 0; } catch (e) {}
       const have = await auCount(); if (have === 0 || have < was / 2) rec = {};
       const todo = list.filter(f => rec[f.name] !== f.sha); if (!todo.length) return;
       const bar = document.getElementById('au-bar'); if (!AU.on) bar.classList.add('show');
-      let got = 0;
+      let got = 0; const seen = new Set();
       for (const [i, f] of todo.entries()) {
+        if (seen.has(f.sha)) { rec[f.name] = f.sha; continue; } seen.add(f.sha);
         if (!AU.on) auStatus('📥 Restaurando áudios do servidor (' + (i + 1) + '/' + todo.length + ')…');
-        try { const r = await fetch('audio/' + encodeURIComponent(f.name)); if (!r.ok) continue; got += await auImportBuffer(await r.arrayBuffer()); rec[f.name] = f.sha; } catch (e) {}
+        try { const r = await fetch(encodeURIComponent(dir) + '/' + encodeURIComponent(f.name)); if (!r.ok) continue; got += await auImportBuffer(await r.arrayBuffer()); rec[f.name] = f.sha; } catch (e) {}
       }
       try { localStorage.setItem('au_packs', JSON.stringify(rec)); } catch (e) {}
       await auSyncN(); auCovUI();
@@ -2250,7 +2267,7 @@
     function passiveStop() { AU.stopGen = true; AU.on = false; auHalt(); auKeepOff(); document.getElementById('au-bar').classList.remove('show'); try { if (AU.lock) AU.lock.release(); } catch (e) {} AU.lock = null; }
     const _auRcq = renderCurrentQuestion;
     renderCurrentQuestion = function () { _auRcq.apply(this, arguments); const q = auCur(); if (AU.auto && !AU.on && q && q.id !== AU.lastId) setTimeout(audioReadNow, 150); };
-    Object.assign(window, { audioStorageTest, audioExport, audioImport, audioPregen, audioCfg, audioTestCloud, audioReadNow, audioToggleAuto, audioSet, passiveStart, passiveToggle, passiveSkip, passiveStop });
+    Object.assign(window, { audioMarkSent, audioStorageTest, audioExport, audioImport, audioPregen, audioCfg, audioTestCloud, audioReadNow, audioToggleAuto, audioSet, passiveStart, passiveToggle, passiveSkip, passiveStop });
     if (window.speechSynthesis) speechSynthesis.onvoiceschanged = auInitUI;
     auInitUI();
     setTimeout(auGuard, 1500);
