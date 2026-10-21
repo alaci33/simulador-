@@ -1911,7 +1911,27 @@
       try { r.persist = (await navigator.storage.persisted()) ? 'sim' : 'não'; } catch (e) {}
       return r;
     }
-    async function audioStorageTest() { const r = await auStorageTest(); alert('Endereço: ' + r.proto + (r.seguro ? ' (seguro)' : ' (NÃO seguro)') + '\nIndexedDB (guarda os áudios): ' + (r.idb ? 'FUNCIONA' : 'NÃO FUNCIONA' + (r.idbErr ? ' – ' + r.idbErr : '')) + '\nlocalStorage (configurações): ' + (r.ls ? 'funciona' : 'não funciona') + '\nProteção contra limpeza: ' + r.persist + '\nÁudios no armazenamento: ' + (await auCount()) + '\nRestauração do servidor: ' + (AU.restoreMsg || 'ainda não executada') + '\nVoz própria do aparelho: ' + ((window.speechSynthesis && speechSynthesis.getVoices && speechSynthesis.getVoices().length) ? 'sim' : 'não')); }
+    function auBeepUrl() {
+      const sr = 8000, n = 2800, b = new ArrayBuffer(44 + n), d = new DataView(b), w = (o, t) => [...t].forEach((c, i) => d.setUint8(o + i, c.charCodeAt(0)));
+      w(0, 'RIFF'); d.setUint32(4, 36 + n, true); w(8, 'WAVEfmt '); d.setUint32(16, 16, true); d.setUint16(20, 1, true); d.setUint16(22, 1, true); d.setUint32(24, sr, true); d.setUint32(28, sr, true); d.setUint16(32, 1, true); d.setUint16(34, 8, true); w(36, 'data'); d.setUint32(40, n, true);
+      const u = new Uint8Array(b, 44); for (let i = 0; i < n; i++) u[i] = 128 + Math.round(60 * Math.sin(2 * Math.PI * 440 * i / sr));
+      return URL.createObjectURL(new Blob([b], { type:'audio/wav' }));
+    }
+    async function auPlayTest() {
+      const play = url => new Promise(res => {
+        const a = new Audio(); let done = false; const fin = r => { if (!done) { done = true; try { a.pause(); } catch (e) {} res(r); } };
+        a.onplaying = () => setTimeout(() => fin('tocou'), 250); a.onerror = () => fin('erro de mídia'); a.src = url; a.volume = 0.3;
+        try { const p = a.play(); if (p && p.catch) p.catch(e => fin('bloqueado (' + ((e && e.name) || e) + ')')); } catch (e) { fin('falhou (' + e.message + ')'); }
+        setTimeout(() => fin('sem resposta em 4 s'), 4000);
+      });
+      const out = {}; try { out.mp3 = (new Audio()).canPlayType('audio/mpeg') || 'não'; } catch (e) { out.mp3 = '?'; }
+      out.beep = await play(auBeepUrl());
+      const ks = [...(await auKeySet())].filter(k => String(k).startsWith('el2|') && !String(k).includes('|num|'));
+      if (ks.length) { const b = await auGet(ks[0]); out.clip = b ? await play(URL.createObjectURL(b)) : 'não encontrado'; } else out.clip = 'não há áudios';
+      return out;
+    }
+    async function audioStorageTest() {
+      auUnlock(); const pt = auPlayTest(); const r = await auStorageTest(); AU._pt = await pt; alert('Endereço: ' + r.proto + (r.seguro ? ' (seguro)' : ' (NÃO seguro)') + '\nIndexedDB (guarda os áudios): ' + (r.idb ? 'FUNCIONA' : 'NÃO FUNCIONA' + (r.idbErr ? ' – ' + r.idbErr : '')) + '\nlocalStorage (configurações): ' + (r.ls ? 'funciona' : 'não funciona') + '\nProteção contra limpeza: ' + r.persist + '\nÁudios no armazenamento: ' + (await auCount()) + '\nRestauração do servidor: ' + (AU.restoreMsg || 'ainda não executada') + '\nVoz própria do aparelho: ' + ((window.speechSynthesis && speechSynthesis.getVoices && speechSynthesis.getVoices().length) ? 'sim' : 'não') + (() => { const o = AU._pt || {}; return '\nSom — MP3: ' + o.mp3 + ' | bipe: ' + o.beep + ' | áudio guardado: ' + o.clip; })()); }
     AU.inf = new Map(); AU.busy = Promise.resolve();
     AU.exp = new Set(); try { JSON.parse(localStorage.getItem('au_exp') || '[]').forEach(k => AU.exp.add(k)); } catch (e) {}
     const auSaveExp = () => { try { localStorage.setItem('au_exp', JSON.stringify([...AU.exp])); } catch (e) {} };
@@ -1955,7 +1975,7 @@
       auCloud(text, !!(st && st.num), st && st.k).then(url => {
         if (my !== AU.run) return;
         auStatus('🔊 ElevenLabs');
-        auPlayUrl(url, AU.rate, () => { try { URL.revokeObjectURL(url); } catch (e) {} if (my === AU.run) done && done(); }, why => { try { URL.revokeObjectURL(url); } catch (e) {} if (my !== AU.run) return; if (st && st.k && why === 'erro de áudio') auDel(st.k); AU.warnAt = Date.now(); auStatus('⚠ Áudio ElevenLabs falhou (' + why + '). Usando a voz do aparelho.'); auSpeak(text, done); });
+        auPlayUrl(url, AU.rate, () => { try { URL.revokeObjectURL(url); } catch (e) {} if (my === AU.run) done && done(); }, why => { try { URL.revokeObjectURL(url); } catch (e) {} if (my !== AU.run) return; AU.playErr = why; AU.playErrAt = Date.now(); if (st && st.k && why === 'erro de áudio') auDel(st.k); AU.warnAt = Date.now(); auStatus('⚠ Áudio ElevenLabs falhou (' + why + '). Usando a voz do aparelho.'); auSpeak(text, done); });
       }).catch(e => {
         if (my !== AU.run) return;
         AU._force = false;
@@ -2048,7 +2068,7 @@
         const kl = dv.getUint32(o), bl = dv.getUint32(o + 4); o += 8; if (o + kl + bl > buf.byteLength) break;
         const k = dec.decode(new Uint8Array(buf, o, kl)); o += kl;
         if (known && known.has(k)) { AU.exp.add(k); o += bl; continue; }
-        await auPut(k, new Blob([buf.slice(o, o + bl)], { type:'audio/mpeg' })); AU.exp.add(k); if (known) known.add(k); o += bl; n++;
+        const ok = await auPut(k, new Blob([buf.slice(o, o + bl)], { type:'audio/mpeg' })); AU.exp.add(k); if (ok) { if (known) known.add(k); n++; } else AU.impFails = (AU.impFails || 0) + 1; o += bl;
       }
       if (n) auSaveExp();
       return n;
@@ -2092,11 +2112,11 @@
       for (const [i, f] of todo.entries()) {
         if (seen.has(f.sha)) { rec[f.name] = f.sha; continue; } seen.add(f.sha);
         if (!AU.on) auStatus('📥 Restaurando áudios do servidor (' + (i + 1) + '/' + todo.length + ')…');
-        try { const r = await fetch(encodeURIComponent(dir) + '/' + encodeURIComponent(f.name)); if (!r.ok) { fails++; continue; } got += await auImportBuffer(await r.arrayBuffer(), known); rec[f.name] = f.sha; } catch (e) { fails++; }
+        try { const r = await fetch(encodeURIComponent(dir) + '/' + encodeURIComponent(f.name)); if (!r.ok) { fails++; continue; } AU.impFails = 0; got += await auImportBuffer(await r.arrayBuffer(), known); if (AU.impFails) fails++; else rec[f.name] = f.sha; } catch (e) { fails++; }
       }
       try { localStorage.setItem('au_packs', JSON.stringify(rec)); if (!fails) localStorage.setItem('au_chk', String(Date.now())); } catch (e) {}
       await auSyncN(); auCovUI();
-      AU.restoreMsg = got + ' áudios novos restaurados' + (fails ? ' (' + fails + ' arquivo(s) falharam)' : '');
+      AU.restoreMsg = got + ' áudios novos restaurados' + (fails ? ' (' + fails + ' arquivo(s) com falha ao guardar: abra de novo para tentar outra vez)' : '');
       say('📥 ' + AU.restoreMsg + '.', 6000);
     }
     function auAutoRestore() { AU.busy = auRestoreRun().catch(() => {}); return AU.busy; }
@@ -2162,7 +2182,7 @@
         if (k === 0 && best && best !== v) return auSpeak(text, done, 1);
         if (document.hidden) { AU.tts = true; return; }
         const none = !(window.speechSynthesis && speechSynthesis.getVoices && speechSynthesis.getVoices().length);
-        auStatus(none ? '⚠ Este aparelho não tem voz própria e não achei áudios guardados para esta questão. Aguarde a restauração (📥) ou confira o armazenamento no menu.' : '⚠ A voz do aparelho falhou (' + why + '). Troque o mecanismo de voz do Android.');
+        auStatus(AU.playErrAt && Date.now() - AU.playErrAt < 20000 ? '⚠ O áudio da questão está guardado, mas este aparelho não conseguiu tocá-lo (' + AU.playErr + '). Toque em 🔧 Testar armazenamento e veja a linha "Som".' : none ? '⚠ Este aparelho não tem voz própria e não achei áudios guardados para esta questão. Aguarde a restauração (📥) ou confira o armazenamento no menu.' : '⚠ A voz do aparelho falhou (' + why + '). Troque o mecanismo de voz do Android.');
         const bar = document.getElementById('au-bar'); if (bar) bar.classList.add('show');
         if (AU.on) { AU.paused = true; const b = document.getElementById('au-pp'); if (b) b.textContent = '▶'; }
       };
