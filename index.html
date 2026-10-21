@@ -1911,7 +1911,7 @@
       try { r.persist = (await navigator.storage.persisted()) ? 'sim' : 'não'; } catch (e) {}
       return r;
     }
-    async function audioStorageTest() { const r = await auStorageTest(); alert('Endereço: ' + r.proto + (r.seguro ? ' (seguro)' : ' (NÃO seguro)') + '\nIndexedDB (guarda os áudios): ' + (r.idb ? 'FUNCIONA' : 'NÃO FUNCIONA' + (r.idbErr ? ' – ' + r.idbErr : '')) + '\nlocalStorage (configurações): ' + (r.ls ? 'funciona' : 'não funciona') + '\nProteção contra limpeza: ' + r.persist + '\nÁudios no armazenamento: ' + (await auCount())); }
+    async function audioStorageTest() { const r = await auStorageTest(); alert('Endereço: ' + r.proto + (r.seguro ? ' (seguro)' : ' (NÃO seguro)') + '\nIndexedDB (guarda os áudios): ' + (r.idb ? 'FUNCIONA' : 'NÃO FUNCIONA' + (r.idbErr ? ' – ' + r.idbErr : '')) + '\nlocalStorage (configurações): ' + (r.ls ? 'funciona' : 'não funciona') + '\nProteção contra limpeza: ' + r.persist + '\nÁudios no armazenamento: ' + (await auCount()) + '\nRestauração do servidor: ' + (AU.restoreMsg || 'ainda não executada') + '\nVoz própria do aparelho: ' + ((window.speechSynthesis && speechSynthesis.getVoices && speechSynthesis.getVoices().length) ? 'sim' : 'não')); }
     AU.inf = new Map(); AU.busy = Promise.resolve();
     AU.exp = new Set(); try { JSON.parse(localStorage.getItem('au_exp') || '[]').forEach(k => AU.exp.add(k)); } catch (e) {}
     const auSaveExp = () => { try { localStorage.setItem('au_exp', JSON.stringify([...AU.exp])); } catch (e) {} };
@@ -2063,24 +2063,41 @@
       inp.click();
     }
     async function auRestoreRun() {
-      const m = String(location.hostname).match(/^(.+)\.github\.io$/), repo = String(location.pathname).split('/').filter(Boolean)[0]; if (!m || !repo) return;
-      let list = [], dir = 'audio';
-      for (const d of ['audio', 'áudio']) { try { const r = await fetch('https://api.github.com/repos/' + m[1] + '/' + repo + '/contents/' + encodeURIComponent(d)); if (!r.ok) continue; const j = await r.json(); if (Array.isArray(j)) { list = j.filter(f => f.type !== 'dir' && !/\.(html?|txt|md|json|png|jpe?g|gif|css|js)$/i.test(f.name)); dir = d; break; } } catch (e) {} }
-      if (!list.length) return;
-      let rec = {}; try { rec = JSON.parse(localStorage.getItem('au_packs') || '{}'); } catch (e) {}
-      let was = 0; try { was = +localStorage.getItem('au_n') || 0; } catch (e) {}
-      const have = await auCount(); if (have === 0 || have < was / 2) rec = {};
-      const todo = list.filter(f => rec[f.name] !== f.sha); if (!todo.length) return;
+      const m = String(location.hostname).match(/^(.+)\.github\.io$/), repo = String(location.pathname).split('/').filter(Boolean)[0];
+      if (!m || !repo) { AU.restoreMsg = 'não é um endereço github.io'; return; }
+      const say = (t, ms) => { if (AU.on) return; const bar = document.getElementById('au-bar'); bar.classList.add('show'); auStatus(t); if (ms) setTimeout(() => bar.classList.remove('show'), ms); };
+      let was = 0, rec = {}; try { was = +localStorage.getItem('au_n') || 0; rec = JSON.parse(localStorage.getItem('au_packs') || '{}'); } catch (e) {}
+      const have = await auCount(), healthy = have > 0 && have >= was / 2;
+      let last = 0; try { last = +localStorage.getItem('au_chk') || 0; } catch (e) {}
+      if (healthy && Date.now() - last < 20 * 60000) { AU.restoreMsg = 'tudo certo (verificado há pouco)'; return; }
+      const st = await auStorageTest(), voices = window.speechSynthesis && speechSynthesis.getVoices ? speechSynthesis.getVoices().length : 0;
+      if (!st.idb && !voices && !healthy) { AU.restoreMsg = 'este aparelho não guarda áudios nem tem voz própria'; say('⚠ Este navegador não consegue guardar os áudios e não tem voz própria. Use o app no celular e envie o som para a TV.', 12000); return; }
+      let dirs = ['audio', 'áudio']; try { const d0 = localStorage.getItem('au_dir'); if (d0) dirs = [d0, ...dirs.filter(x => x !== d0)]; } catch (e) {}
+      let list = [], dir = 'audio', why = '';
+      for (const d of dirs) {
+        try {
+          const r = await fetch('https://api.github.com/repos/' + m[1] + '/' + repo + '/contents/' + encodeURIComponent(d));
+          if (r.status === 403 || r.status === 429) { why = 'limite de consultas do GitHub (' + r.status + '): tente de novo em cerca de 1 hora'; break; }
+          if (!r.ok) { why = 'pasta "' + d + '" não encontrada (' + r.status + ')'; continue; }
+          const j = await r.json(); if (Array.isArray(j)) { list = j.filter(f => f.type !== 'dir' && !/\.(html?|txt|md|json|png|jpe?g|gif|css|js)$/i.test(f.name)); dir = d; why = ''; break; }
+        } catch (e) { why = 'sem conexão com o GitHub'; }
+      }
+      if (!list.length) { AU.restoreMsg = why || 'pasta de áudios vazia'; if (!healthy) say('⚠ Não consegui restaurar os áudios do servidor: ' + AU.restoreMsg, 12000); return; }
+      try { localStorage.setItem('au_dir', dir); } catch (e) {}
+      if (!healthy) rec = {};
+      const todo = list.filter(f => rec[f.name] !== f.sha);
+      if (!todo.length) { AU.restoreMsg = 'tudo certo: nada novo no servidor'; try { localStorage.setItem('au_chk', String(Date.now())); } catch (e) {} return; }
       const bar = document.getElementById('au-bar'); if (!AU.on) bar.classList.add('show');
-      let got = 0; const seen = new Set(), known = await auKeySet();
+      let got = 0, fails = 0; const seen = new Set(), known = await auKeySet();
       for (const [i, f] of todo.entries()) {
         if (seen.has(f.sha)) { rec[f.name] = f.sha; continue; } seen.add(f.sha);
         if (!AU.on) auStatus('📥 Restaurando áudios do servidor (' + (i + 1) + '/' + todo.length + ')…');
-        try { const r = await fetch(encodeURIComponent(dir) + '/' + encodeURIComponent(f.name)); if (!r.ok) continue; got += await auImportBuffer(await r.arrayBuffer(), known); rec[f.name] = f.sha; } catch (e) {}
+        try { const r = await fetch(encodeURIComponent(dir) + '/' + encodeURIComponent(f.name)); if (!r.ok) { fails++; continue; } got += await auImportBuffer(await r.arrayBuffer(), known); rec[f.name] = f.sha; } catch (e) { fails++; }
       }
-      try { localStorage.setItem('au_packs', JSON.stringify(rec)); } catch (e) {}
+      try { localStorage.setItem('au_packs', JSON.stringify(rec)); if (!fails) localStorage.setItem('au_chk', String(Date.now())); } catch (e) {}
       await auSyncN(); auCovUI();
-      if (!AU.on) { auStatus('📥 ' + got + ' áudios novos restaurados do servidor.'); setTimeout(() => bar.classList.remove('show'), 5000); }
+      AU.restoreMsg = got + ' áudios novos restaurados' + (fails ? ' (' + fails + ' arquivo(s) falharam)' : '');
+      say('📥 ' + AU.restoreMsg + '.', 6000);
     }
     function auAutoRestore() { AU.busy = auRestoreRun().catch(() => {}); return AU.busy; }
     async function audioPregen() {
@@ -2208,6 +2225,7 @@
       const my0 = AU.run;
       if (AU.busy) { auStatus('⏳ Aguardando a restauração dos áudios…'); await AU.busy; if (!AU.on || AU.run !== my0) return; }
       await auAdoptNs();
+      if (!AU.evoice && !(window.speechSynthesis && speechSynthesis.getVoices && speechSynthesis.getVoices().length)) { passiveStop(); alert('Este aparelho não tem voz própria e não há áudios guardados nele.\n' + (AU.restoreMsg ? 'Restauração: ' + AU.restoreMsg + '\n' : '') + 'Use o app no celular e envie o som para a TV.'); return; }
       let q = auCur();
       if (q && auCacheOnly()) {
         const from = state.filteredIndex;
