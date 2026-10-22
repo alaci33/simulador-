@@ -2030,30 +2030,46 @@
     }
     function audioCfg(k, v) { AU[k] = v; AU.cloudOff = false; auSave(); auInitUI(); auCovUI(); }
     function audioTestCloud() { auUnlock(); if (!(AU.ekey && AU.evoice) && !AU.key) { alert('Cole a chave e o ID da voz da ElevenLabs.'); return; } auHalt(); AU.cloudOff = false; AU._force = true; auStatus(''); document.getElementById('au-bar').classList.add('show'); auSay('Olá! Esta é a voz neural online. Estou pronta para ler as suas questões.', () => { AU._force = false; document.getElementById('au-bar').classList.remove('show'); }); }
+    function auExpPanel(parts) {
+      const old = document.getElementById('au-exp'); if (old && old.remove) old.remove();
+      const urls = [], st = (el, css) => { el.style.cssText = css; return el; };
+      const box = st(document.createElement('div'), 'position:fixed;left:0;right:0;top:0;bottom:0;z-index:90;background:rgba(0,0,0,0.78);display:flex;align-items:center;justify-content:center;padding:16px'); box.id = 'au-exp';
+      const card = st(document.createElement('div'), 'background:#1e293b;color:#e2e8f0;border-radius:16px;padding:18px;max-width:560px;width:100%;max-height:90vh;overflow:auto;font-size:0.95rem');
+      const h = st(document.createElement('div'), 'font-weight:700;font-size:1.1rem;margin-bottom:8px'); h.textContent = '💾 Backup: ' + parts.length + ' arquivo(s)';
+      const t = st(document.createElement('div'), 'margin-bottom:12px;opacity:0.85;line-height:1.4'); t.textContent = 'Toque em cada botão e confirme o download. Cada parte só passa a contar como "com backup" depois do seu toque. Depois envie os arquivos à pasta audio do GitHub.';
+      card.appendChild(h); card.appendChild(t);
+      parts.forEach((p, i) => {
+        const b = st(document.createElement('button'), 'display:block;width:100%;min-height:52px;margin:8px 0;padding:10px;border-radius:12px;border:1px solid #475569;background:#0f172a;color:#e2e8f0;font-size:1rem;text-align:left');
+        const label = () => (p.done ? '✔ ' : '⬇ ') + 'Parte ' + (i + 1) + ' de ' + parts.length + ' · ' + (p.blob.size / 1048576).toFixed(1) + ' MB · ' + p.name;
+        b.textContent = label();
+        b.onclick = () => {
+          const a = document.createElement('a'), u = URL.createObjectURL(p.blob); urls.push(u); a.href = u; a.download = p.name;
+          document.body.appendChild(a); a.click(); a.remove();
+          p.keys.forEach(k => AU.exp.add(k)); auSaveExp(); p.done = true; b.textContent = label(); auCovUI();
+        };
+        card.appendChild(b);
+      });
+      const c = st(document.createElement('button'), 'display:block;width:100%;min-height:48px;margin-top:12px;border-radius:12px;border:0;background:#38bdf8;color:#0f172a;font-weight:700;font-size:1rem'); c.textContent = 'Fechar';
+      c.onclick = () => { urls.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) {} }); box.remove(); };
+      card.appendChild(c); box.appendChild(card); document.body.appendChild(box); return box;
+    }
     async function audioExport(all) {
       if (AU.exporting) return; AU.exporting = true;
       try {
         const keys = new Set(AU.mem.keys()); (await auKeys()).forEach(k => keys.add(k)); keys.delete('__teste');
         const list = [...keys].filter(k => all === true || !AU.exp.has(k));
         if (!list.length) { alert(all === true ? 'Não há nenhum áudio guardado.' : 'Nenhum áudio novo desde o último backup. Nada a exportar.'); return; }
-        const enc = new TextEncoder(), groups = [], used = []; let cur = [], sz = 0, bytes = 0;
+        const enc = new TextEncoder(), groups = []; let cur = { parts: [], keys: [] }, sz = 0;
         for (const k of list) {
           const b = await auGet(k); if (!b || !b.size) continue;
-          if (sz + b.size > (AU.chunkMB || 20) * 1048576 && cur.length) { groups.push(cur); cur = []; sz = 0; }
+          if (sz + b.size > (AU.chunkMB || 20) * 1048576 && cur.keys.length) { groups.push(cur); cur = { parts: [], keys: [] }; sz = 0; }
           const kb = enc.encode(k), h = new DataView(new ArrayBuffer(8)); h.setUint32(0, kb.length); h.setUint32(4, b.size);
-          cur.push(h.buffer, kb, b); sz += b.size; bytes += b.size; used.push(k);
+          cur.parts.push(h.buffer, kb, b); cur.keys.push(k); sz += b.size;
         }
-        if (cur.length) groups.push(cur);
-        const d = new Date(), p2 = x => String(x).padStart(2, '0'), stamp = p2(d.getMonth() + 1) + p2(d.getDate()) + '-' + p2(d.getHours()) + p2(d.getMinutes()), names = [];
-        for (const [gi, g] of groups.entries()) {
-          const nm = 'bk-' + stamp + (groups.length > 1 ? '-' + (gi + 1) + 'de' + groups.length : '') + '.bak'; names.push(nm);
-          const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([enc.encode('AUDIOBK1'), ...g], { type:'application/octet-stream' })); a.download = nm;
-          document.body.appendChild(a); a.click(); a.remove(); await new Promise(r => setTimeout(r, 400));
-        }
-        used.forEach(k => AU.exp.add(k)); auSaveExp();
-        document.getElementById('au-bar').classList.add('show');
-        auStatus('💾 ' + used.length + ' áudios ' + (all === true ? '(completo)' : 'novos') + ' · ' + (bytes / 1048576).toFixed(1) + ' MB · ' + names.join(', ') + ' · envie à pasta audio do GitHub');
-        setTimeout(() => document.getElementById('au-bar').classList.remove('show'), 9000);
+        if (cur.keys.length) groups.push(cur);
+        if (!groups.length) { alert('Nenhum áudio legível para exportar.'); return; }
+        const d = new Date(), p2 = x => String(x).padStart(2, '0'), stamp = p2(d.getMonth() + 1) + p2(d.getDate()) + '-' + p2(d.getHours()) + p2(d.getMinutes());
+        auExpPanel(groups.map((g, gi) => ({ name: 'bk-' + stamp + (groups.length > 1 ? '-' + (gi + 1) + 'de' + groups.length : '') + '.bak', blob: new Blob([enc.encode('AUDIOBK1'), ...g.parts], { type:'application/octet-stream' }), keys: g.keys, done: false })));
       } finally { AU.exporting = false; }
     }
     async function audioMarkSent() {
