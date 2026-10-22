@@ -2030,25 +2030,101 @@
     }
     function audioCfg(k, v) { AU[k] = v; AU.cloudOff = false; auSave(); auInitUI(); auCovUI(); }
     function audioTestCloud() { auUnlock(); if (!(AU.ekey && AU.evoice) && !AU.key) { alert('Cole a chave e o ID da voz da ElevenLabs.'); return; } auHalt(); AU.cloudOff = false; AU._force = true; auStatus(''); document.getElementById('au-bar').classList.add('show'); auSay('Olá! Esta é a voz neural online. Estou pronta para ler as suas questões.', () => { AU._force = false; document.getElementById('au-bar').classList.remove('show'); }); }
+    /* ===== ZIP (método "store", sem compressão) para backup em arquivo único =====
+       Motivo: o Chrome bloqueia/engole downloads programáticos em sequência (a.click),
+       o que deixava a Parte 1 (e às vezes outras) fora do backup. Um único arquivo
+       por toque elimina essa trava de múltiplos downloads. */
+    const AU_CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; } return t; })();
+    const auCrc32 = u8 => { let c = 0xFFFFFFFF; for (let i = 0; i < u8.length; i++) c = AU_CRC_T[(c ^ u8[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+    /* == zip helpers == */
+    async function auZip(files) {
+      const enc = new TextEncoder(), chunks = [], centr = []; let off = 0;
+      const d = new Date(), tm = (d.getHours() << 11 | d.getMinutes() << 5 | d.getSeconds() >> 1) & 0xFFFF, dt = ((d.getFullYear() - 1980) << 9 | (d.getMonth() + 1) << 5 | d.getDate()) & 0xFFFF;
+      for (const f of files) {
+        const nm = enc.encode(f.name), data = new Uint8Array(await f.data.arrayBuffer()), crc = auCrc32(data);
+        const lh = new Uint8Array(30 + nm.length), lv = new DataView(lh.buffer);
+        lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true); lv.setUint16(6, 0, true); lv.setUint16(8, 0, true); lv.setUint16(10, tm, true); lv.setUint16(12, dt, true);
+        lv.setUint32(14, crc, true); lv.setUint32(18, data.length, true); lv.setUint32(22, data.length, true); lv.setUint16(26, nm.length, true); lv.setUint16(28, 0, true);
+        lh.set(nm, 30);
+        chunks.push(lh, data);
+        centr.push({ nm, crc, len: data.length, off });
+        off += lh.length + data.length;
+        await new Promise(r => setTimeout(r, 0));
+      }
+      let cdSize = 0;
+      for (const e of centr) {
+        const ch = new Uint8Array(46 + e.nm.length), cv = new DataView(ch.buffer);
+        cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true); cv.setUint16(8, 0, true); cv.setUint16(10, 0, true); cv.setUint16(12, tm, true); cv.setUint16(14, dt, true);
+        cv.setUint32(16, e.crc, true); cv.setUint32(20, e.len, true); cv.setUint32(24, e.len, true); cv.setUint16(28, e.nm.length, true);
+        cv.setUint32(38, 0, true); cv.setUint32(42, e.off, true);
+        ch.set(e.nm, 46);
+        chunks.push(ch); cdSize += ch.length;
+      }
+      const eo = new Uint8Array(22), ev = new DataView(eo.buffer);
+      ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, centr.length, true); ev.setUint16(10, centr.length, true); ev.setUint32(12, cdSize, true); ev.setUint32(16, off, true);
+      chunks.push(eo);
+      return new Blob(chunks, { type: 'application/zip' });
+    }
+    function auUnzip(buf) {
+      const dv = new DataView(buf), u8 = new Uint8Array(buf), out = [];
+      if (buf.byteLength < 30 || dv.getUint32(0, true) !== 0x04034b50) return out;
+      let o = 0;
+      while (o + 30 <= buf.byteLength && dv.getUint32(o, true) === 0x04034b50) {
+        const method = dv.getUint16(o + 8, true), csize = dv.getUint32(o + 18, true), nmLen = dv.getUint16(o + 26, true), exLen = dv.getUint16(o + 28, true);
+        const name = new TextDecoder().decode(u8.subarray(o + 30, o + 30 + nmLen)), dataStart = o + 30 + nmLen + exLen;
+        if (method !== 0 || dataStart + csize > buf.byteLength) break;
+        out.push({ name, data: u8.subarray(dataStart, dataStart + csize) });
+        o = dataStart + csize;
+      }
+      return out;
+    }
+    /* == fim zip helpers == */
     function auExpPanel(parts) {
       const old = document.getElementById('au-exp'); if (old && old.remove) old.remove();
       const urls = [], st = (el, css) => { el.style.cssText = css; return el; };
       const box = st(document.createElement('div'), 'position:fixed;left:0;right:0;top:0;bottom:0;z-index:90;background:rgba(0,0,0,0.78);display:flex;align-items:center;justify-content:center;padding:16px'); box.id = 'au-exp';
       const card = st(document.createElement('div'), 'background:#1e293b;color:#e2e8f0;border-radius:16px;padding:18px;max-width:560px;width:100%;max-height:90vh;overflow:auto;font-size:0.95rem');
-      const h = st(document.createElement('div'), 'font-weight:700;font-size:1.1rem;margin-bottom:8px'); h.textContent = '💾 Backup: ' + parts.length + ' arquivo(s)';
-      const t = st(document.createElement('div'), 'margin-bottom:12px;opacity:0.85;line-height:1.4'); t.textContent = 'Toque em cada botão e confirme o download. Cada parte só passa a contar como "com backup" depois do seu toque. Depois envie os arquivos à pasta audio do GitHub.';
+      const total = parts.reduce((a, p) => a + p.blob.size, 0);
+      const h = st(document.createElement('div'), 'font-weight:700;font-size:1.1rem;margin-bottom:8px'); h.textContent = '💾 Backup em arquivo único (' + parts.length + (parts.length === 1 ? ' parte' : ' partes') + ' · ' + (total / 1048576).toFixed(1) + ' MB)';
+      const t = st(document.createElement('div'), 'margin-bottom:12px;opacity:0.85;line-height:1.4'); t.textContent = 'Um toque só: o botão abaixo baixa um único .zip com TODAS as partes dentro — assim o Chrome não bloqueia nem perde nenhum download. Depois extraia o zip e envie os arquivos .bak à pasta audio do GitHub. Se o download não começar, toque de novo.';
       card.appendChild(h); card.appendChild(t);
+      const dl = (blob, name) => { const a = document.createElement('a'), u = URL.createObjectURL(blob); urls.push(u); a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove(); };
+      const d = new Date(), p2 = x => String(x).padStart(2, '0'), stamp = p2(d.getMonth() + 1) + p2(d.getDate()) + '-' + p2(d.getHours()) + p2(d.getMinutes());
+      const zipName = 'bk-' + stamp + '.zip';
+      const plabel = (p, i) => (p.done ? '✔ ' : '⬇ ') + 'Parte ' + (i + 1) + ' de ' + parts.length + ' · ' + (p.blob.size / 1048576).toFixed(1) + ' MB · ' + p.name;
+      const markAll = () => { parts.forEach(p => { p.done = true; p.keys.forEach(k => AU.exp.add(k)); }); auSaveExp(); };
+      const zb = st(document.createElement('button'), 'display:block;width:100%;min-height:56px;margin:8px 0;padding:12px;border-radius:12px;border:0;background:#38bdf8;color:#0f172a;font-weight:700;font-size:1rem');
+      const zlabel = ok => (ok ? '✔ ' : '⬇ ') + 'Baixar backup completo · ' + zipName;
+      zb.textContent = zlabel(false);
+      let zbusy = false, zblob = null;
+      zb.onclick = async () => {
+        if (zbusy) return; zbusy = true;
+        zb.textContent = '⏳ Gerando o zip…';
+        try {
+          if (!zblob) zblob = await auZip(parts.map(p => ({ name: p.name, data: p.blob })));
+          dl(zblob, zipName);
+          markAll();
+          zb.textContent = zlabel(true) + ' — baixado. Não veio nada? Toque de novo.';
+          parts.forEach((p, i) => { const b = partBtns[i]; if (b) b.textContent = plabel(p, i); });
+          auCovUI();
+        } catch (e) { zb.textContent = '⚠ Falha ao gerar o zip: ' + ((e && e.message) || e) + '. Use as partes separadas abaixo.'; }
+        zbusy = false;
+      };
+      card.appendChild(zb);
+      const tg = st(document.createElement('button'), 'display:block;width:100%;margin:10px 0 4px;padding:8px;border-radius:10px;border:1px solid #475569;background:transparent;color:#94a3b8;font-size:0.85rem');
+      tg.textContent = '▾ Alternativa: baixar as partes separadas (.bak)';
+      const alt = st(document.createElement('div'), 'display:none');
+      tg.onclick = () => { const open = alt.style.display === 'block'; alt.style.display = open ? 'none' : 'block'; tg.textContent = (open ? '▾' : '▴') + ' Alternativa: baixar as partes separadas (.bak)'; };
+      const warn = st(document.createElement('div'), 'font-size:0.78rem;color:#f59e0b;margin:6px 0'); warn.textContent = '⚠ Baixando várias partes seguidas, o Chrome pode pedir permissão ou bloquear: se uma parte não baixar, toque de novo nela.';
+      alt.appendChild(warn);
+      const partBtns = [];
       parts.forEach((p, i) => {
         const b = st(document.createElement('button'), 'display:block;width:100%;min-height:52px;margin:8px 0;padding:10px;border-radius:12px;border:1px solid #475569;background:#0f172a;color:#e2e8f0;font-size:1rem;text-align:left');
-        const label = () => (p.done ? '✔ ' : '⬇ ') + 'Parte ' + (i + 1) + ' de ' + parts.length + ' · ' + (p.blob.size / 1048576).toFixed(1) + ' MB · ' + p.name;
-        b.textContent = label();
-        b.onclick = () => {
-          const a = document.createElement('a'), u = URL.createObjectURL(p.blob); urls.push(u); a.href = u; a.download = p.name;
-          document.body.appendChild(a); a.click(); a.remove();
-          p.keys.forEach(k => AU.exp.add(k)); auSaveExp(); p.done = true; b.textContent = label(); auCovUI();
-        };
-        card.appendChild(b);
+        b.textContent = plabel(p, i);
+        b.onclick = () => { dl(p.blob, p.name); p.keys.forEach(k => AU.exp.add(k)); auSaveExp(); p.done = true; b.textContent = plabel(p, i); auCovUI(); };
+        partBtns.push(b); alt.appendChild(b);
       });
+      card.appendChild(tg); card.appendChild(alt);
       const c = st(document.createElement('button'), 'display:block;width:100%;min-height:48px;margin-top:12px;border-radius:12px;border:0;background:#38bdf8;color:#0f172a;font-weight:700;font-size:1rem'); c.textContent = 'Fechar';
       c.onclick = () => { urls.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) {} }); box.remove(); };
       card.appendChild(c); box.appendChild(card); document.body.appendChild(box); return box;
@@ -2059,18 +2135,20 @@
         const keys = new Set(AU.mem.keys()); (await auKeys()).forEach(k => keys.add(k)); keys.delete('__teste');
         const list = [...keys].filter(k => all === true || !AU.exp.has(k));
         if (!list.length) { alert(all === true ? 'Não há nenhum áudio guardado.' : 'Nenhum áudio novo desde o último backup. Nada a exportar.'); return; }
-        const enc = new TextEncoder(), groups = []; let cur = { parts: [], keys: [] }, sz = 0;
+        const tg = document.createElement('div'); tg.style.cssText = 'position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:95;background:#1e293b;color:#e2e8f0;border:1px solid #475569;border-radius:10px;padding:8px 14px;font-size:0.9rem'; tg.textContent = '⏳ Preparando backup… 0/' + list.length; document.body.appendChild(tg);
+        const enc = new TextEncoder(), groups = []; let cur = { parts: [], keys: [] }, sz = 0, idx = 0;
         for (const k of list) {
+          idx++; if ((idx & 7) === 1) tg.textContent = '⏳ Preparando backup… ' + idx + '/' + list.length;
           const b = await auGet(k); if (!b || !b.size) continue;
           if (sz + b.size > (AU.chunkMB || 20) * 1048576 && cur.keys.length) { groups.push(cur); cur = { parts: [], keys: [] }; sz = 0; }
           const kb = enc.encode(k), h = new DataView(new ArrayBuffer(8)); h.setUint32(0, kb.length); h.setUint32(4, b.size);
-          cur.parts.push(h.buffer, kb, b); cur.keys.push(k); sz += b.size;
+          cur.parts.push(h.buffer, kb, b); cur.keys.push(k); sz += b.size + kb.length + 8;
         }
         if (cur.keys.length) groups.push(cur);
         if (!groups.length) { alert('Nenhum áudio legível para exportar.'); return; }
         const d = new Date(), p2 = x => String(x).padStart(2, '0'), stamp = p2(d.getMonth() + 1) + p2(d.getDate()) + '-' + p2(d.getHours()) + p2(d.getMinutes());
         auExpPanel(groups.map((g, gi) => ({ name: 'bk-' + stamp + (groups.length > 1 ? '-' + (gi + 1) + 'de' + groups.length : '') + '.bak', blob: new Blob([enc.encode('AUDIOBK1'), ...g.parts], { type:'application/octet-stream' }), keys: g.keys, done: false })));
-      } finally { AU.exporting = false; }
+      } finally { AU.exporting = false; try { if (tg) tg.remove(); } catch (e) {} }
     }
     async function audioMarkSent() {
       if (!confirm('Confirma que TODOS os áudios guardados agora já estão enviados ao GitHub?\nO app passará a exportar só o que for gerado daqui em diante.')) return;
@@ -2078,6 +2156,11 @@
     }
     async function auImportBuffer(buf, known) {
       let n = 0; const dv = new DataView(buf), dec = new TextDecoder();
+      if (buf.byteLength >= 4 && dv.getUint32(0, true) === 0x04034b50) {
+        for (const m of auUnzip(buf)) { try { n += await auImportBuffer(m.data.buffer.slice(m.data.byteOffset, m.data.byteOffset + m.data.byteLength), known); } catch (x) {} }
+        if (n) auSaveExp();
+        return n;
+      }
       if (buf.byteLength < 8 || dec.decode(new Uint8Array(buf, 0, 8)) !== 'AUDIOBK1') return 0;
       let o = 8;
       while (o + 8 <= buf.byteLength) {
