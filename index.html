@@ -1661,13 +1661,16 @@
 
     function exportProgressBackup() {
       const payload = { dataVersion: DATA_VERSION, userAnswers: state.userAnswers, flags: state.flags, simHistory: state.simHistory };
-      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(payload, null, 2));
+      // Blob + URL de objeto em vez de data: URI — o mesmo problema de downloads engolidos
+      // que afetava o backup de áudios; data: URI também tem limite de tamanho no Chrome.
+      const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
       const a = document.createElement('a');
-      a.setAttribute("href", dataStr);
+      a.href = url;
       a.setAttribute("download", "backup_progresso_questoes.json");
       document.body.appendChild(a);
       a.click();
       a.remove();
+      setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 30000);
       state.lastBackup = Date.now();
       persist();
       renderStatsView();
@@ -2306,6 +2309,14 @@
       auUnlock();
       if (!window.speechSynthesis) { alert('Este navegador não suporta leitura em voz alta.'); return; }
       const q = auCur(); if (!q) return;
+      if (AU.on) {
+        // Durante o estudo passivo: reinicia a questão atual dentro da sequência (anúncio, enunciado,
+        // pausa, gabarito e continua para a próxima), em vez de quebrar a corrente e deixar a barra muda.
+        auHalt(); AU.paused = false;
+        const pp = document.getElementById('au-pp'); if (pp) pp.textContent = '⏸';
+        AU.lastId = q.id; AU.steps = auBuild(q, state.filteredIndex + 1); AU.i = 0; auRun();
+        return;
+      }
       auHalt(); AU.lastId = q.id;
       const b = auBuild(q, state.filteredIndex + 1);
       auSay(b[0].x, () => auSay(b[1].x, null, b[1].f, b[1]), b[0].f, b[0]);
@@ -2369,7 +2380,13 @@
         nextQuestion(); auLoad(); return;
       }
       AU.run++; const my = AU.run, adv = () => { if (my === AU.run) { AU.i++; auRun(); } };
-      clearTimeout(AU.sw); AU.sw = setTimeout(adv, st.t === 'say' ? 150000 : st.ms + 6000);
+      clearTimeout(AU.sw);
+      if (st.t === 'say') {
+        // Limite fixo de 150 s cortava a leitura de questões longas (com comentário, em velocidade lenta)
+        // enquanto o áudio ainda tocava. Agora o limite cresce com o tamanho do texto e, ao estourar,
+        // interrompe o áudio atual antes de avançar — nunca há voz sobreposta nem corte abrupto.
+        AU.sw = setTimeout(() => { if (my !== AU.run) return; auHalt(); AU.i++; auRun(); }, Math.max(150000, auClean(st.x).length * 240000 / AU.rate + 90000));
+      } else AU.sw = setTimeout(adv, st.ms + 6000);
       if (st.t === 'say') { auSay(st.x, adv, st.f, st); return; }
       const nx = AU.steps[AU.i + 1]; if (auOnline() && nx && nx.x && !st.quiet) auCloud(nx.x, !!nx.num, nx.k).catch(() => {});
       const secs = Math.ceil(st.ms / 1000), fall = () => { AU.timer = setTimeout(adv, st.ms); };
@@ -2408,7 +2425,7 @@
       try { if (navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { AU.lock = l; }).catch(() => {}); } catch (e) {}
       auKeepOn(); auLoad();
     }
-    function passiveToggle() { AU.paused = !AU.paused; document.getElementById('au-pp').textContent = AU.paused ? '▶' : '⏸'; if (AU.paused) { auHalt(); auStatus('⏸ Pausado'); } else auRun(); }
+    function passiveToggle() { if (!AU.on) return; AU.paused = !AU.paused; document.getElementById('au-pp').textContent = AU.paused ? '▶' : '⏸'; if (AU.paused) { auHalt(); auStatus('⏸ Pausado'); } else auRun(); }
     function passiveSkip() { if (!AU.on) return; auHalt(); AU.paused = false; document.getElementById('au-pp').textContent = '⏸'; AU.i = AU.steps.length; auRun(); }
     function passiveStop() { AU.stopGen = true; AU.on = false; auHalt(); auKeepOff(); document.getElementById('au-bar').classList.remove('show'); try { if (AU.lock) AU.lock.release(); } catch (e) {} AU.lock = null; }
     const _auRcq = renderCurrentQuestion;
